@@ -19,6 +19,7 @@ Gem::Specification.new do |spec|
     lib/**/*.rb sig/**/*.rbs ext/**/*.{rb,rs,toml,md} Cargo.toml
     Cargo.lock README.md LICENSE.txt CHANGELOG.md
   ]).select { |path| File.file?(path) }
+    .reject { |path| path.end_with?('/tests.rs') || path.include?('/tests/') }
   spec.require_paths = ['lib']
   spec.extensions = ['ext/lease_machines_native/extconf.rb']
   spec.add_dependency 'rb_sys', '~> 0.9', '>= 0.9.130'

@@ -8,6 +8,6 @@ description = "Deterministic single-authority lease transitions and resource fen
 keywords = ["lease", "fencing", "no-std"]
 categories = ["no-std", "algorithms"]
 readme = "README.md"
-
+exclude = ["src/**/tests.rs", "tests/"]
 [lints]
 workspace = true
