@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/seuros/lease_machines/compare/lease_machines/v0.1.1...lease_machines/v0.1.2) (2026-11-06)
+
+
+### Bug Fixes
+
+* cross builds no longer compile for the host ([e7571a9](https://github.com/seuros/lease_machines/commit/e7571a988886534052055c05b31d97a686aaeca7))
+
 ## [0.1.1](https://github.com/seuros/lease_machines/compare/lease_machines-v0.1.0...lease_machines/v0.1.1) (2026-11-06)
 
 
