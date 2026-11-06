@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/seuros/lease_machines/compare/lease-machines-v0.2.2...lease-machines-v0.3.0) (2026-11-06)
+
+
+### Features
+
+* rebuild authorities from storage and model the holder side ([5fe2199](https://github.com/seuros/lease_machines/commit/5fe2199af3efca8666f5015511649c802d95b77f))
+
 ## [0.2.2](https://github.com/seuros/lease_machines/compare/lease-machines-v0.2.1...lease-machines-v0.2.2) (2026-11-06)
 
 
