@@ -167,6 +167,7 @@ impl LeaseAuthority {
     #[must_use]
     pub fn acquire(&mut self, owner: OwnerId, now: Duration, ttl: Duration) -> Decision {
         self.grant(owner, now, ttl, false)
+            .map_or_else(Decision::Rejected, Decision::Granted)
     }
 
     /// Acquire like `acquire`, or rotate the token of `owner`'s own unexpired grant.
@@ -176,26 +177,26 @@ impl LeaseAuthority {
     #[must_use]
     pub fn reacquire(&mut self, owner: OwnerId, now: Duration, ttl: Duration) -> Decision {
         self.grant(owner, now, ttl, true)
+            .map_or_else(Decision::Rejected, Decision::Granted)
     }
 
-    fn grant(&mut self, owner: OwnerId, now: Duration, ttl: Duration, rotate: bool) -> Decision {
-        let now = match self.observe(now) {
-            Ok(now) => now,
-            Err(reason) => return Decision::Rejected(reason),
-        };
-        let Some(expires_at) = expiration(now, ttl) else {
-            return Decision::Rejected(Rejection::InvalidTtl);
-        };
+    fn grant(
+        &mut self,
+        owner: OwnerId,
+        now: Duration,
+        ttl: Duration,
+        rotate: bool,
+    ) -> Result<Lease, Rejection> {
+        let now = self.observe(now)?;
+        let expires_at = expiration(now, ttl).ok_or(Rejection::InvalidTtl)?;
         if self
             .state
             .lease
             .is_some_and(|lease| now < lease.expires_at && !(rotate && lease.owner == owner))
         {
-            return Decision::Rejected(Rejection::Occupied);
+            return Err(Rejection::Occupied);
         }
-        let Some(token) = FencingToken::next(self.state.last_issued) else {
-            return Decision::Rejected(Rejection::TokenExhausted);
-        };
+        let token = FencingToken::next(self.state.last_issued).ok_or(Rejection::TokenExhausted)?;
         let lease = Lease {
             owner,
             token,
@@ -203,7 +204,7 @@ impl LeaseAuthority {
         };
         self.state.last_issued = Some(token);
         self.state.lease = Some(lease);
-        Decision::Granted(lease)
+        Ok(lease)
     }
 
     /// Renew only the current unexpired grant, retaining its token.
@@ -217,39 +218,49 @@ impl LeaseAuthority {
         now: Duration,
         ttl: Duration,
     ) -> Decision {
-        let now = match self.observe(now) {
-            Ok(now) => now,
-            Err(reason) => return Decision::Rejected(reason),
-        };
-        let Some(mut lease) = self.state.lease else {
-            return Decision::Rejected(Rejection::NoLease);
-        };
-        if let Some(reason) = lease.rejection(owner, token, now) {
-            return Decision::Rejected(reason);
-        }
-        let Some(expires_at) = expiration(now, ttl) else {
-            return Decision::Rejected(Rejection::InvalidTtl);
-        };
+        self.extend(owner, token, now, ttl)
+            .map_or_else(Decision::Rejected, Decision::Renewed)
+    }
+
+    fn extend(
+        &mut self,
+        owner: OwnerId,
+        token: FencingToken,
+        now: Duration,
+        ttl: Duration,
+    ) -> Result<Lease, Rejection> {
+        let (now, mut lease) = self.held(owner, token, now)?;
+        let expires_at = expiration(now, ttl).ok_or(Rejection::InvalidTtl)?;
         lease.expires_at = lease.expires_at.max(expires_at);
         self.state.lease = Some(lease);
-        Decision::Renewed(lease)
+        Ok(lease)
     }
 
     /// Release only the current unexpired grant, retaining the token high-water.
     #[must_use]
     pub fn release(&mut self, owner: OwnerId, token: FencingToken, now: Duration) -> Decision {
-        let now = match self.observe(now) {
-            Ok(now) => now,
-            Err(reason) => return Decision::Rejected(reason),
-        };
-        let Some(lease) = self.state.lease else {
-            return Decision::Rejected(Rejection::NoLease);
-        };
-        if let Some(reason) = lease.rejection(owner, token, now) {
-            return Decision::Rejected(reason);
+        match self.held(owner, token, now) {
+            Ok(_) => {
+                self.state.lease = None;
+                Decision::Released
+            }
+            Err(reason) => Decision::Rejected(reason),
         }
-        self.state.lease = None;
-        Decision::Released
+    }
+
+    /// Observe `now`, then return it with the current grant if `owner` holds
+    /// it under `token` and it has not expired.
+    fn held(
+        &mut self,
+        owner: OwnerId,
+        token: FencingToken,
+        now: Duration,
+    ) -> Result<(Duration, Lease), Rejection> {
+        let now = self.observe(now)?;
+        let lease = self.state.lease.ok_or(Rejection::NoLease)?;
+        lease
+            .rejection(owner, token, now)
+            .map_or(Ok((now, lease)), Err)
     }
 
     fn observe(&mut self, now: Duration) -> Result<Duration, Rejection> {
