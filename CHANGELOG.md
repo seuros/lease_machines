@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.4](https://github.com/seuros/lease_machines/compare/lease_machines/v0.1.3...lease_machines/v0.1.4) (2026-11-06)
+
+
+### Bug Fixes
+
+* crates.io keywords and categories for the core ([c4f147f](https://github.com/seuros/lease_machines/commit/c4f147f9cb2d69bac209d2d1c50e851f5137ff80))
+
 ## [0.1.3](https://github.com/seuros/lease_machines/compare/lease_machines/v0.1.2...lease_machines/v0.1.3) (2026-11-06)
 
 
