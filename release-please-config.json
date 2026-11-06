@@ -1,0 +1,16 @@
+{
+  "plugins": ["cargo-workspace"],
+  "packages": {
+    ".": {
+      "release-type": "ruby",
+      "package-name": "lease_machines",
+      "bump-minor-pre-major": true,
+      "bump-patch-for-minor-pre-major": true
+    },
+    "ext/lease_machines_native/core": {
+      "release-type": "rust",
+      "package-name": "lease-machines",
+      "bump-minor-pre-major": true
+    }
+  }
+}

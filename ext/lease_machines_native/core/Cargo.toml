@@ -1,0 +1,13 @@
+[package]
+name = "lease-machines"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Deterministic single-authority lease transitions and resource fencing decisions"
+keywords = ["lease", "fencing", "no-std"]
+categories = ["no-std", "algorithms"]
+readme = "README.md"
+
+[lints]
+workspace = true

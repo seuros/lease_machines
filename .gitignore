@@ -1,0 +1,10 @@
+/target/
+Cargo.lock
+Gemfile.lock
+/.bundle/
+/pkg/
+/tmp/
+/lib/lease_machines_native/
+/ext/**/Makefile
+/ext/**/mkmf.log
+*.gem

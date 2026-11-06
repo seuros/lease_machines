@@ -1,0 +1,30 @@
+module LeaseMachines
+  VERSION: String
+  class Lease
+    def owner: () -> Integer
+    def token: () -> Integer
+    def expires_at: () -> Float
+  end
+  class Checkpoint
+    def last_issued: () -> Integer?
+    def observed: () -> Float
+  end
+  class Decision < Data
+    attr_reader status: Symbol
+    attr_reader lease: Lease?
+    attr_reader reason: Symbol?
+  end
+  class Authority
+    def self.new: () -> instance
+    def self.restore: (Checkpoint) -> instance
+    def acquire: (owner: Integer, now: Float, ttl: Float) -> Decision
+    def renew: (owner: Integer, token: Integer, now: Float, ttl: Float) -> Decision
+    def release: (owner: Integer, token: Integer, now: Float) -> Decision
+    def checkpoint: () -> Checkpoint
+  end
+  class Fence
+    def self.new: (?highest: Integer?) -> instance
+    def accept: (Integer) -> bool
+    def highest: () -> Integer?
+  end
+end
