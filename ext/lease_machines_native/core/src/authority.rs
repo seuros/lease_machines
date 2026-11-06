@@ -24,6 +24,17 @@ pub enum Rejection {
     TokenExhausted,
 }
 
+/// How an authority treats an observation earlier than its last one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum ClockPolicy {
+    /// Reject the request with `Rejection::ClockRegressed`, changing nothing.
+    #[default]
+    Reject,
+    /// Evaluate the request at the last observation instead of the earlier `now`.
+    Clamp,
+}
+
 /// A proposed state-machine outcome, to commit before exposing success.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -50,6 +61,29 @@ pub struct Checkpoint {
 }
 
 impl Checkpoint {
+    /// Rebuild committed state from storage columns.
+    ///
+    /// Returns `None` when a lease carries a token the history never issued.
+    /// Use `Duration::ZERO` as `observed` when storage keeps no clock watermark.
+    #[must_use]
+    pub const fn from_parts(
+        last_issued: Option<FencingToken>,
+        lease: Option<Lease>,
+        observed: Duration,
+    ) -> Option<Self> {
+        if let Some(lease) = lease {
+            match last_issued {
+                Some(highest) if lease.token.value() <= highest.value() => {}
+                _ => return None,
+            }
+        }
+        Some(Self {
+            last_issued,
+            lease,
+            observed,
+        })
+    }
+
     /// Greatest token issued in this authority history, even after release.
     #[must_use]
     pub const fn last_issued(self) -> Option<FencingToken> {
@@ -76,6 +110,7 @@ impl Checkpoint {
 #[derive(Debug, PartialEq, Eq)]
 pub struct LeaseAuthority {
     state: Checkpoint,
+    clock: ClockPolicy,
 }
 
 impl Default for LeaseAuthority {
@@ -94,6 +129,7 @@ impl LeaseAuthority {
                 lease: None,
                 observed: Duration::ZERO,
             },
+            clock: ClockPolicy::Reject,
         }
     }
 
@@ -102,7 +138,23 @@ impl LeaseAuthority {
     /// The caller must prevent simultaneous serving by the previous authority.
     #[must_use]
     pub const fn restore(checkpoint: Checkpoint) -> Self {
-        Self { state: checkpoint }
+        Self {
+            state: checkpoint,
+            clock: ClockPolicy::Reject,
+        }
+    }
+
+    /// Choose how earlier-than-observed clocks are handled; `Reject` by default.
+    #[must_use]
+    pub const fn with_clock_policy(mut self, clock: ClockPolicy) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    /// Policy applied to regressing observations.
+    #[must_use]
+    pub const fn clock_policy(&self) -> ClockPolicy {
+        self.clock
     }
 
     /// Capture state for a host-controlled commit or deterministic simulation.
@@ -114,13 +166,31 @@ impl LeaseAuthority {
     /// Acquire an unoccupied/expired resource with a new, strictly greater token.
     #[must_use]
     pub fn acquire(&mut self, owner: OwnerId, now: Duration, ttl: Duration) -> Decision {
-        if let Some(reason) = self.observe(now) {
-            return Decision::Rejected(reason);
-        }
+        self.grant(owner, now, ttl, false)
+    }
+
+    /// Acquire like `acquire`, or rotate the token of `owner`'s own unexpired grant.
+    ///
+    /// Another owner's unexpired grant is still `Occupied`. The previous token
+    /// becomes stale, so in-flight work under it is fenced.
+    #[must_use]
+    pub fn reacquire(&mut self, owner: OwnerId, now: Duration, ttl: Duration) -> Decision {
+        self.grant(owner, now, ttl, true)
+    }
+
+    fn grant(&mut self, owner: OwnerId, now: Duration, ttl: Duration, rotate: bool) -> Decision {
+        let now = match self.observe(now) {
+            Ok(now) => now,
+            Err(reason) => return Decision::Rejected(reason),
+        };
         let Some(expires_at) = expiration(now, ttl) else {
             return Decision::Rejected(Rejection::InvalidTtl);
         };
-        if self.state.lease.is_some_and(|lease| now < lease.expires_at) {
+        if self
+            .state
+            .lease
+            .is_some_and(|lease| now < lease.expires_at && !(rotate && lease.owner == owner))
+        {
             return Decision::Rejected(Rejection::Occupied);
         }
         let Some(token) = FencingToken::next(self.state.last_issued) else {
@@ -147,9 +217,10 @@ impl LeaseAuthority {
         now: Duration,
         ttl: Duration,
     ) -> Decision {
-        if let Some(reason) = self.observe(now) {
-            return Decision::Rejected(reason);
-        }
+        let now = match self.observe(now) {
+            Ok(now) => now,
+            Err(reason) => return Decision::Rejected(reason),
+        };
         let Some(mut lease) = self.state.lease else {
             return Decision::Rejected(Rejection::NoLease);
         };
@@ -167,9 +238,10 @@ impl LeaseAuthority {
     /// Release only the current unexpired grant, retaining the token high-water.
     #[must_use]
     pub fn release(&mut self, owner: OwnerId, token: FencingToken, now: Duration) -> Decision {
-        if let Some(reason) = self.observe(now) {
-            return Decision::Rejected(reason);
-        }
+        let now = match self.observe(now) {
+            Ok(now) => now,
+            Err(reason) => return Decision::Rejected(reason),
+        };
         let Some(lease) = self.state.lease else {
             return Decision::Rejected(Rejection::NoLease);
         };
@@ -180,12 +252,15 @@ impl LeaseAuthority {
         Decision::Released
     }
 
-    fn observe(&mut self, now: Duration) -> Option<Rejection> {
+    fn observe(&mut self, now: Duration) -> Result<Duration, Rejection> {
         if now < self.state.observed {
-            return Some(Rejection::ClockRegressed);
+            return match self.clock {
+                ClockPolicy::Reject => Err(Rejection::ClockRegressed),
+                ClockPolicy::Clamp => Ok(self.state.observed),
+            };
         }
         self.state.observed = now;
-        None
+        Ok(now)
     }
 }
 

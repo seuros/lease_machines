@@ -29,6 +29,16 @@ pub struct Lease {
 }
 
 impl Lease {
+    /// Rebuild a committed grant from storage; see `Checkpoint::from_parts`.
+    #[must_use]
+    pub const fn new(owner: OwnerId, token: FencingToken, expires_at: Duration) -> Self {
+        Self {
+            owner,
+            token,
+            expires_at,
+        }
+    }
+
     /// Owner identity that received this grant.
     #[must_use]
     pub const fn owner(self) -> OwnerId {

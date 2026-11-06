@@ -39,6 +39,52 @@ assert_eq!(
   Non-regressing observations advance the clock even when the request is rejected.
 - Zero TTL and deadline overflow are rejected. Exhausted token space fails closed;
   tokens never wrap.
+- `reacquire` is `acquire` plus one exception: the current owner may rotate its own
+  unexpired grant to a new token. The old token is stale from then on, so anything
+  still holding it is fenced. Another owner's live grant is still `Occupied`.
+
+## Rebuilding an Authority from Storage
+
+```rust
+use core::time::Duration;
+use lease_machines::{Checkpoint, Decision, FencingToken, Lease, LeaseAuthority, OwnerId};
+
+# fn example() -> Option<()> {
+// One row per resource: owner id, token, expires_at (ms), token high-water.
+let (owner, token, expires_at_ms, last_issued) = (7_u64, 3_u64, 9_000_u64, 3_u64);
+let lease = Lease::new(
+    OwnerId::new(owner), FencingToken::new(token)?, Duration::from_millis(expires_at_ms),
+);
+let committed = Checkpoint::from_parts(FencingToken::new(last_issued), Some(lease), Duration::ZERO)?;
+let mut authority = LeaseAuthority::restore(committed);
+let Decision::Granted(next) = authority.acquire(
+    OwnerId::new(8), Duration::from_millis(9_000), Duration::from_secs(5),
+) else {
+    panic!("the previous grant expired");
+};
+assert_eq!(next.token().value(), 4);
+# Some(())
+# }
+# assert_eq!(example(), Some(()));
+```
+
+- `OwnerId` and `FencingToken` are plain `u64` on the wire: `new()` in, `value()` out.
+  String owners hash to a `u64` on the caller's side; the authority only compares.
+- `from_parts` refuses a lease whose token the history never issued. Keep the
+  high-water column even after release; it is what makes the next token greater.
+- `observed` is the clock watermark. Pass `Duration::ZERO` when storage keeps none,
+  and the authority trusts whatever `now` the next request brings.
+
+## Clocks
+
+Time is a `Duration` from an origin the caller picks: a monotonic start, or the Unix
+epoch when the clock is a database's wall clock in milliseconds. One origin per
+authority history.
+
+By default an observation earlier than the last one is `Rejection::ClockRegressed`
+and nothing changes. `with_clock_policy(ClockPolicy::Clamp)` evaluates such a request
+at the last observation instead: expiry checks and new deadlines use the later time,
+so a backwards step can never revive a lease or shorten one.
 
 ## Fencing at the Protected Resource
 
@@ -63,6 +109,46 @@ It does **not** prove current lease validity, authorize an owner, authenticate a
 token, or deduplicate operations. A resource cannot reject a newly stale owner on
 fencing grounds until it has observed a greater token. If immediate revocation is
 required, add an authority/expiry check under an appropriate protocol.
+
+## Holding a Lease
+
+```rust
+use core::time::Duration;
+use lease_machines::{Cadence, FencingToken, Holder, HolderState};
+
+# fn example() -> Option<()> {
+let secs = Duration::from_secs;
+let cadence = Cadence::new(secs(30), secs(10), secs(5))?;
+let mut holder = Holder::new(FencingToken::new(1)?, secs(0), cadence);
+assert!(!holder.renewal_due(secs(9)));
+assert!(holder.renewal_due(secs(10)));
+assert!(holder.refresh(secs(10)));
+assert_eq!(holder.state(), HolderState::Unconfirmed);
+assert!(holder.confirm(FencingToken::new(1)?, secs(11)));
+assert_eq!(holder.state(), HolderState::Confirmed);
+assert!(holder.at_risk(secs(36)));
+assert!(holder.expire());
+assert!(holder.reacquire(FencingToken::new(2)?, secs(40)));
+holder.fence();
+assert_eq!(holder.warning_deadline(), None);
+# Some(())
+# }
+# assert_eq!(example(), Some(()));
+```
+
+The holder is the other half of the conversation: it decides when to renew, how
+nervous to be, and when to stop writing. It runs on the holder's own clock and
+never compares instants with the authority.
+
+- `Confirmed` -> `refresh` -> `Unconfirmed`, or `AtRisk` once past the warning
+  deadline (`ttl - warn_before` after the last confirmation).
+- `confirm(token, at)` closes an attempt and reschedules. A response with an older
+  token than the current one is a stale reply and is ignored; the same or a newer
+  token is accepted.
+- `expire` means the authority said so; only `reacquire` with a strictly newer token
+  recovers. `fence` is terminal and idempotent; every predicate answers accordingly.
+- `renewal_due` is true whenever a renewal is outstanding, so a failed attempt
+  retries on the next poll without any extra state.
 
 ## Required Runtime and Persistence Contract
 

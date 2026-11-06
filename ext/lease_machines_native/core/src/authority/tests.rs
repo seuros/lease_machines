@@ -190,3 +190,74 @@ fn rejected_renewal_preserves_grant_but_advances_clock() {
     );
     assert_eq!(authority.checkpoint().lease(), Some(lease));
 }
+
+#[test]
+fn restored_rows_must_agree_with_the_token_high_water() {
+    let token = FencingToken::new(3).expect("positive token");
+    let lease = Lease::new(FIRST, token, at(9));
+    assert_eq!(lease.owner(), FIRST);
+    assert_eq!(lease.token(), token);
+    assert_eq!(lease.expires_at(), at(9));
+    assert_eq!(Checkpoint::from_parts(None, Some(lease), at(0)), None);
+    assert_eq!(
+        Checkpoint::from_parts(FencingToken::new(2), Some(lease), at(0)),
+        None,
+    );
+    let committed = Checkpoint::from_parts(Some(token), Some(lease), Duration::ZERO)
+        .expect("lease token is within the history");
+    assert_eq!(committed.lease(), Some(lease));
+    let mut restored = LeaseAuthority::restore(committed);
+    assert_eq!(
+        restored.acquire(SECOND, at(8), at(5)),
+        Decision::Rejected(Rejection::Occupied),
+    );
+    let next = granted(restored.acquire(SECOND, at(9), at(5)));
+    assert_eq!(next.token().value(), 4);
+    let released = Checkpoint::from_parts(Some(token), None, at(1)).expect("released rows restore");
+    assert_eq!(released.last_issued(), Some(token));
+}
+
+#[test]
+fn reacquisition_rotates_only_the_current_owner_token() {
+    let mut authority = LeaseAuthority::new();
+    let first = granted(authority.acquire(FIRST, at(0), at(5)));
+    assert_eq!(
+        authority.reacquire(SECOND, at(1), at(5)),
+        Decision::Rejected(Rejection::Occupied),
+    );
+    let rotated = granted(authority.reacquire(FIRST, at(1), at(5)));
+    assert!(rotated.token() > first.token());
+    assert_eq!(rotated.expires_at(), at(6));
+    assert_eq!(
+        authority.renew(FIRST, first.token(), at(2), at(5)),
+        Decision::Rejected(Rejection::StaleToken),
+    );
+    assert_eq!(
+        authority.acquire(FIRST, at(2), at(5)),
+        Decision::Rejected(Rejection::Occupied),
+    );
+    let after_expiry = granted(authority.reacquire(SECOND, at(6), at(5)));
+    assert!(after_expiry.token() > rotated.token());
+}
+
+#[test]
+fn clamped_clocks_evaluate_at_the_last_observation() {
+    let mut authority = LeaseAuthority::new().with_clock_policy(ClockPolicy::Clamp);
+    assert_eq!(authority.clock_policy(), ClockPolicy::Clamp);
+    assert_eq!(LeaseAuthority::new().clock_policy(), ClockPolicy::Reject);
+    let lease = granted(authority.acquire(FIRST, at(10), at(5)));
+    let renewed_lease = renewed(authority.renew(FIRST, lease.token(), at(3), at(5)));
+    assert_eq!(renewed_lease.expires_at(), at(15));
+    assert_eq!(authority.checkpoint().observed(), at(10));
+    assert_eq!(
+        authority.acquire(SECOND, at(14), at(5)),
+        Decision::Rejected(Rejection::Occupied),
+    );
+    assert_eq!(authority.checkpoint().observed(), at(14));
+    assert_eq!(
+        authority.release(FIRST, lease.token(), at(2)),
+        Decision::Released,
+    );
+    let late = granted(authority.acquire(SECOND, at(1), at(5)));
+    assert_eq!(late.expires_at(), at(19));
+}
