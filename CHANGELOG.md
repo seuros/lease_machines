@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.6](https://github.com/seuros/lease_machines/compare/lease_machines/v0.1.5...lease_machines/v0.1.6) (2026-11-06)
+
+
+### Bug Fixes
+
+* share lease renew/release checks in authority ([3c44626](https://github.com/seuros/lease_machines/commit/3c446267e004228b03df335e577f35b19b0c645f))
+
 ## [0.1.5](https://github.com/seuros/lease_machines/compare/lease_machines/v0.1.4...lease_machines/v0.1.5) (2026-11-06)
 
 
