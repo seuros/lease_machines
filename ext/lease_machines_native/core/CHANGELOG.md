@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/seuros/lease_machines/compare/lease-machines-v0.2.0...lease-machines-v0.2.1) (2026-11-06)
+
+
+### Bug Fixes
+
+* keep test sources out of the packaged gem and crate ([6f0b979](https://github.com/seuros/lease_machines/commit/6f0b979351f1fe456d7ae922203f1ec69274d70d))
+
 ## [0.2.0](https://github.com/seuros/lease_machines/compare/lease-machines-v0.1.0...lease-machines-v0.2.0) (2026-11-06)
 
 
