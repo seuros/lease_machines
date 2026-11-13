@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.0](https://github.com/seuros/lease_machines/compare/lease_machines/v0.1.6...lease_machines/v0.2.0) (2026-11-13)
+
+
+### ⚠ BREAKING CHANGES
+
+* converted to the fleet conventions. One exhaustive Refusal per crate, Result from every operation that can refuse, a refusal changes nothing, provable idempotent repeats are honoured, Ruby mirrors the core. No compatibility aliases. Decision is gone; FencingToken has no Ord (use order / is_newer_than); authorities and fences are built for a scope; restored takes scope and clock policy; Ruby times are Integer nanoseconds and sibling values are read by their readers. Expired is an answer about the instant supplied and is not remembered.
+
+### Features
+
+* scope fencing tokens through periscope, answer Result&lt;_, Refusal&gt;, stop refusals moving the clock ([8d47108](https://github.com/seuros/lease_machines/commit/8d47108cec8fb514bb1b1d204f7590d2e066d1c3))
+
 ## [0.1.6](https://github.com/seuros/lease_machines/compare/lease_machines/v0.1.5...lease_machines/v0.1.6) (2026-11-06)
 
 
