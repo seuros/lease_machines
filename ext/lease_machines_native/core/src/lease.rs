@@ -1,8 +1,10 @@
 use core::time::Duration;
 
-use crate::{FencingToken, Rejection};
+use crate::FencingToken;
 
 /// An opaque numeric owner identity, scoped and authenticated by the adapter.
+///
+/// Supplied by the caller, never issued by the authority: it carries no scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OwnerId(u64);
 
@@ -23,13 +25,14 @@ impl OwnerId {
 /// One grant in a resource's serialized authority history.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Lease {
-    pub(crate) owner: OwnerId,
-    pub(crate) token: FencingToken,
-    pub(crate) expires_at: Duration,
+    owner: OwnerId,
+    token: FencingToken,
+    expires_at: Duration,
 }
 
 impl Lease {
-    /// Rebuild a committed grant from storage; see `Checkpoint::from_parts`.
+    /// Rebuild a committed grant from storage; see
+    /// [`Checkpoint::from_parts`](crate::Checkpoint::from_parts).
     #[must_use]
     pub const fn new(owner: OwnerId, token: FencingToken, expires_at: Duration) -> Self {
         Self {
@@ -45,7 +48,7 @@ impl Lease {
         self.owner
     }
 
-    /// Resource-scoped token to present to protected mutations.
+    /// Token to present to protected mutations; it carries the authority's scope.
     #[must_use]
     pub const fn token(self) -> FencingToken {
         self.token
@@ -55,22 +58,5 @@ impl Lease {
     #[must_use]
     pub const fn expires_at(self) -> Duration {
         self.expires_at
-    }
-
-    pub(crate) fn rejection(
-        self,
-        owner: OwnerId,
-        token: FencingToken,
-        now: Duration,
-    ) -> Option<Rejection> {
-        if self.owner != owner {
-            Some(Rejection::WrongOwner)
-        } else if self.token != token {
-            Some(Rejection::StaleToken)
-        } else if now >= self.expires_at {
-            Some(Rejection::Expired)
-        } else {
-            None
-        }
     }
 }

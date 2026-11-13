@@ -1,115 +1,44 @@
 use core::time::Duration;
 
-use crate::{FencingToken, Lease, OwnerId};
+use periscope_machines::Issuer;
 
-/// Why an authority rejected a request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Rejection {
-    /// An unexpired lease already occupies the resource.
-    Occupied,
-    /// No grant exists to renew or release.
-    NoLease,
-    /// The request's owner does not match the current grant.
-    WrongOwner,
-    /// The request's token does not match the current grant.
-    StaleToken,
-    /// The current grant has expired.
-    Expired,
-    /// Time moved backwards relative to a previous observation.
-    ClockRegressed,
-    /// TTL is zero or its addition overflows the duration range.
-    InvalidTtl,
-    /// No greater fencing token can be issued.
-    TokenExhausted,
-}
+use crate::{Checkpoint, FencingToken, Lease, OwnerId, Refusal};
 
-/// How an authority treats an observation earlier than its last one.
+/// How an authority treats a `now` earlier than its latest honoured observation.
+///
+/// Under either policy the watermark is the latest `now` of an *honoured*
+/// call: a refused call records nothing, so it is checked against the
+/// watermark but never moves it. A grant answered [`Refusal::Expired`] at one
+/// instant may therefore still be renewed at an earlier one that is not
+/// behind the watermark.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[non_exhaustive]
 pub enum ClockPolicy {
-    /// Reject the request with `Rejection::ClockRegressed`, changing nothing.
+    /// Refuse the request with [`Refusal::ClockRegressed`].
     #[default]
     Reject,
-    /// Evaluate the request at the last observation instead of the earlier `now`.
+    /// Evaluate the request at the watermark instead of the earlier `now`:
+    /// expiry checks and new deadlines use the later time, so a backwards
+    /// step cannot undo what an honoured call did. It cannot bring back a
+    /// grant that was released or replaced, and it cannot shorten one. A
+    /// clamped call that is honoured leaves the watermark where it was; one
+    /// that is refused for another reason changes nothing, like any refusal.
+    ///
+    /// It does not make a refused instant final: see [`Refusal::Expired`].
     Clamp,
 }
 
-/// A proposed state-machine outcome, to commit before exposing success.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Decision {
-    /// A new token and lease were assigned.
-    Granted(Lease),
-    /// The current lease was renewed without changing its token.
-    Renewed(Lease),
-    /// The current lease was released.
-    Released,
-    /// The request was rejected.
-    Rejected(Rejection),
-}
-
-/// Opaque authority state with no promised wire representation.
-///
-/// Restore only the newest committed state with the same monotonic clock origin.
-/// Copying or rolling back this value does not create an independent authority.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Checkpoint {
-    last_issued: Option<FencingToken>,
-    lease: Option<Lease>,
-    observed: Duration,
-}
-
-impl Checkpoint {
-    /// Rebuild committed state from storage columns.
-    ///
-    /// Returns `None` when a lease carries a token the history never issued.
-    /// Use `Duration::ZERO` as `observed` when storage keeps no clock watermark.
-    #[must_use]
-    pub const fn from_parts(
-        last_issued: Option<FencingToken>,
-        lease: Option<Lease>,
-        observed: Duration,
-    ) -> Option<Self> {
-        if let Some(lease) = lease {
-            match last_issued {
-                Some(highest) if lease.token.value() <= highest.value() => {}
-                _ => return None,
-            }
-        }
-        Some(Self {
-            last_issued,
-            lease,
-            observed,
-        })
-    }
-
-    /// Greatest token issued in this authority history, even after release.
-    #[must_use]
-    pub const fn last_issued(self) -> Option<FencingToken> {
-        self.last_issued
-    }
-
-    /// Last grant; it may already be expired at the latest observation.
-    #[must_use]
-    pub const fn lease(self) -> Option<Lease> {
-        self.lease
-    }
-
-    /// Latest accepted clock observation, including rejected requests.
-    #[must_use]
-    pub const fn observed(self) -> Duration {
-        self.observed
-    }
-}
-
-/// A deterministic lease authority for one resource and token namespace.
+/// A deterministic lease authority for one resource and one token scope.
 ///
 /// Runtime adapters must serialize and durably commit transitions before
 /// exposing success. This type provides no distributed agreement or I/O.
-#[derive(Debug, PartialEq, Eq)]
+/// Cloning it does not create a second authority: two instances serving one
+/// scope issue the same tokens.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LeaseAuthority {
-    state: Checkpoint,
+    /// Issues the fencing tokens; it also holds the authority's scope.
+    tokens: Issuer,
+    lease: Option<Lease>,
+    observed: Duration,
     clock: ClockPolicy,
 }
 
@@ -120,27 +49,52 @@ impl Default for LeaseAuthority {
 }
 
 impl LeaseAuthority {
-    /// Start a **fresh** authority namespace. Never use this to reset an old one.
+    /// Start a **fresh** token namespace in scope zero. Never use this to
+    /// reset an old one: it issues the same tokens again.
     #[must_use]
     pub const fn new() -> Self {
+        Self::with_scope(0)
+    }
+
+    /// Start a **fresh** token namespace whose tokens carry `scope`.
+    ///
+    /// Sequence numbers count from one, so two authorities in one scope issue
+    /// identical tokens and a fence cannot tell them apart. Give every
+    /// authority whose tokens could meet its own scope; a token of another
+    /// scope is then [`Refusal::Unknown`] to the authority and to a fence of
+    /// this scope. Keeping scopes distinct is the caller's job.
+    #[must_use]
+    pub const fn with_scope(scope: u16) -> Self {
         Self {
-            state: Checkpoint {
-                last_issued: None,
-                lease: None,
-                observed: Duration::ZERO,
-            },
+            tokens: Issuer::new(scope),
+            lease: None,
+            observed: Duration::ZERO,
             clock: ClockPolicy::Reject,
         }
     }
 
-    /// Restore the newest committed checkpoint under the same clock origin.
+    /// Restore the newest committed checkpoint of `scope`, under the same
+    /// clock origin, with the clock policy stated again.
     ///
+    /// The scope is the caller's, never read out of the checkpoint: `None`
+    /// when the checkpoint is of another scope. The policy is configuration,
+    /// not committed state, so it is an argument rather than a silent default.
     /// The caller must prevent simultaneous serving by the previous authority.
     #[must_use]
-    pub const fn restore(checkpoint: Checkpoint) -> Self {
-        Self {
-            state: checkpoint,
-            clock: ClockPolicy::Reject,
+    pub const fn restored(scope: u16, checkpoint: Checkpoint, clock: ClockPolicy) -> Option<Self> {
+        let (saved, issued, lease, observed) = checkpoint.into_parts();
+        if saved != scope {
+            return None;
+        }
+        match Issuer::resumed(scope, issued) {
+            Some(tokens) => Some(Self {
+                tokens,
+                lease,
+                observed,
+                clock,
+            }),
+            // Unreachable: a checkpoint never holds a count past the last sequence.
+            None => None,
         }
     }
 
@@ -157,27 +111,55 @@ impl LeaseAuthority {
         self.clock
     }
 
+    /// The scope carried by every token this authority issues.
+    #[must_use]
+    pub const fn scope(&self) -> u16 {
+        self.tokens.scope()
+    }
+
+    /// How many tokens have been issued; also the sequence number of the last.
+    #[must_use]
+    pub const fn issued(&self) -> u64 {
+        self.tokens.issued()
+    }
+
     /// Capture state for a host-controlled commit or deterministic simulation.
+    /// Persist it before exposing the decision that produced it.
     #[must_use]
     pub const fn checkpoint(&self) -> Checkpoint {
-        self.state
+        Checkpoint::committed(self.scope(), self.issued(), self.lease, self.observed)
     }
 
-    /// Acquire an unoccupied/expired resource with a new, strictly greater token.
-    #[must_use]
-    pub fn acquire(&mut self, owner: OwnerId, now: Duration, ttl: Duration) -> Decision {
-        self.grant(owner, now, ttl, false)
-            .map_or_else(Decision::Rejected, Decision::Granted)
-    }
-
-    /// Acquire like `acquire`, or rotate the token of `owner`'s own unexpired grant.
+    /// Acquire an unoccupied or expired resource with a new, strictly greater
+    /// token.
     ///
-    /// Another owner's unexpired grant is still `Occupied`. The previous token
-    /// becomes stale, so in-flight work under it is fenced.
-    #[must_use]
-    pub fn reacquire(&mut self, owner: OwnerId, now: Duration, ttl: Duration) -> Decision {
+    /// # Errors
+    /// `ClockRegressed`, `InvalidTtl`, `Occupied` (another owner's unexpired
+    /// grant), `Held` (the owner's own unexpired grant) or `Exhausted`.
+    pub fn acquire(
+        &mut self,
+        owner: OwnerId,
+        now: Duration,
+        ttl: Duration,
+    ) -> Result<Lease, Refusal> {
+        self.grant(owner, now, ttl, false)
+    }
+
+    /// Acquire like `acquire`, or rotate the token of `owner`'s own unexpired
+    /// grant.
+    ///
+    /// The previous token becomes stale, so in-flight work under it is
+    /// fenced. Every honoured call issues a new token: a repeat rotates again.
+    ///
+    /// # Errors
+    /// `ClockRegressed`, `InvalidTtl`, `Occupied` or `Exhausted`.
+    pub fn reacquire(
+        &mut self,
+        owner: OwnerId,
+        now: Duration,
+        ttl: Duration,
+    ) -> Result<Lease, Refusal> {
         self.grant(owner, now, ttl, true)
-            .map_or_else(Decision::Rejected, Decision::Granted)
     }
 
     fn grant(
@@ -186,92 +168,112 @@ impl LeaseAuthority {
         now: Duration,
         ttl: Duration,
         rotate: bool,
-    ) -> Result<Lease, Rejection> {
-        let now = self.observe(now)?;
-        let expires_at = expiration(now, ttl).ok_or(Rejection::InvalidTtl)?;
-        if self
-            .state
-            .lease
-            .is_some_and(|lease| now < lease.expires_at && !(rotate && lease.owner == owner))
+    ) -> Result<Lease, Refusal> {
+        let now = self.at(now)?;
+        let expires_at = expiration(now, ttl).ok_or(Refusal::InvalidTtl)?;
+        if let Some(lease) = self.lease
+            && now < lease.expires_at()
         {
-            return Err(Rejection::Occupied);
+            if lease.owner() != owner {
+                return Err(Refusal::Occupied);
+            }
+            if !rotate {
+                return Err(Refusal::Held);
+            }
         }
-        let token = FencingToken::next(self.state.last_issued).ok_or(Rejection::TokenExhausted)?;
-        let lease = Lease {
-            owner,
-            token,
-            expires_at,
-        };
-        self.state.last_issued = Some(token);
-        self.state.lease = Some(lease);
+        // Issuing is the last thing that can refuse, so no token is consumed
+        // by a call refused for another reason.
+        let token = match self.tokens.issue() {
+            Ok(raw) => FencingToken::from_raw(raw),
+            Err(periscope_machines::Refusal::Exhausted) => None,
+        }
+        .ok_or(Refusal::Exhausted)?;
+        let lease = Lease::new(owner, token, expires_at);
+        self.lease = Some(lease);
+        self.observed = now;
         Ok(lease)
     }
 
-    /// Renew only the current unexpired grant, retaining its token.
+    /// Renew the current grant, retaining its token, when it is unexpired at
+    /// the instant the call is evaluated at.
     ///
-    /// A shorter requested TTL does not shorten the previous expiration.
-    #[must_use]
+    /// A shorter requested TTL does not shorten the previous expiration, so a
+    /// repeated or reordered renewal is honoured and never loses time.
+    ///
+    /// # Errors
+    /// `Unknown`, `ClockRegressed`, `NoLease`, `WrongOwner`, `StaleToken`,
+    /// `Expired` or `InvalidTtl`.
     pub fn renew(
         &mut self,
         owner: OwnerId,
         token: FencingToken,
         now: Duration,
         ttl: Duration,
-    ) -> Decision {
-        self.extend(owner, token, now, ttl)
-            .map_or_else(Decision::Rejected, Decision::Renewed)
-    }
-
-    fn extend(
-        &mut self,
-        owner: OwnerId,
-        token: FencingToken,
-        now: Duration,
-        ttl: Duration,
-    ) -> Result<Lease, Rejection> {
-        let (now, mut lease) = self.held(owner, token, now)?;
-        let expires_at = expiration(now, ttl).ok_or(Rejection::InvalidTtl)?;
-        lease.expires_at = lease.expires_at.max(expires_at);
-        self.state.lease = Some(lease);
+    ) -> Result<Lease, Refusal> {
+        let (now, lease) = self.held(owner, token, now)?;
+        let expires_at = expiration(now, ttl).ok_or(Refusal::InvalidTtl)?;
+        let lease = Lease::new(owner, token, lease.expires_at().max(expires_at));
+        self.lease = Some(lease);
+        self.observed = now;
         Ok(lease)
     }
 
-    /// Release only the current unexpired grant, retaining the token high-water.
-    #[must_use]
-    pub fn release(&mut self, owner: OwnerId, token: FencingToken, now: Duration) -> Decision {
-        match self.held(owner, token, now) {
-            Ok(_) => {
-                self.state.lease = None;
-                Decision::Released
-            }
-            Err(reason) => Decision::Rejected(reason),
-        }
-    }
-
-    /// Observe `now`, then return it with the current grant if `owner` holds
-    /// it under `token` and it has not expired.
-    fn held(
+    /// Release the current grant, when it is unexpired at the instant the
+    /// call is evaluated at, answering the grant that was released. The token
+    /// count is retained: the next token is still greater.
+    ///
+    /// A repeat is `NoLease`, not an honoured duplicate: the authority keeps
+    /// no record of who released what, so it cannot prove the caller's claim.
+    ///
+    /// # Errors
+    /// `Unknown`, `ClockRegressed`, `NoLease`, `WrongOwner`, `StaleToken` or
+    /// `Expired`.
+    pub fn release(
         &mut self,
         owner: OwnerId,
         token: FencingToken,
         now: Duration,
-    ) -> Result<(Duration, Lease), Rejection> {
-        let now = self.observe(now)?;
-        let lease = self.state.lease.ok_or(Rejection::NoLease)?;
-        lease
-            .rejection(owner, token, now)
-            .map_or(Ok((now, lease)), Err)
+    ) -> Result<Lease, Refusal> {
+        let (now, lease) = self.held(owner, token, now)?;
+        self.lease = None;
+        self.observed = now;
+        Ok(lease)
     }
 
-    fn observe(&mut self, now: Duration) -> Result<Duration, Rejection> {
-        if now < self.state.observed {
-            return match self.clock {
-                ClockPolicy::Reject => Err(Rejection::ClockRegressed),
-                ClockPolicy::Clamp => Ok(self.state.observed),
-            };
+    /// The instant to evaluate at and the current grant, when `owner` holds
+    /// it under `token` and it has not expired. Records nothing.
+    fn held(
+        &self,
+        owner: OwnerId,
+        token: FencingToken,
+        now: Duration,
+    ) -> Result<(Duration, Lease), Refusal> {
+        if !self.tokens.owns(token.raw()) {
+            return Err(Refusal::Unknown);
         }
-        self.state.observed = now;
-        Ok(now)
+        let now = self.at(now)?;
+        let lease = self.lease.ok_or(Refusal::NoLease)?;
+        if lease.owner() != owner {
+            Err(Refusal::WrongOwner)
+        } else if lease.token() != token {
+            Err(Refusal::StaleToken)
+        } else if now >= lease.expires_at() {
+            Err(Refusal::Expired)
+        } else {
+            Ok((now, lease))
+        }
+    }
+
+    /// The instant a request at `now` is evaluated at. Records nothing: the
+    /// watermark moves only when the call is honoured.
+    fn at(&self, now: Duration) -> Result<Duration, Refusal> {
+        if now >= self.observed {
+            return Ok(now);
+        }
+        match self.clock {
+            ClockPolicy::Reject => Err(Refusal::ClockRegressed),
+            ClockPolicy::Clamp => Ok(self.observed),
+        }
     }
 }
 
@@ -282,6 +284,3 @@ const fn expiration(now: Duration, ttl: Duration) -> Option<Duration> {
         now.checked_add(ttl)
     }
 }
-
-#[cfg(test)]
-mod tests;

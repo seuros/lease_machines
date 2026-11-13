@@ -1,30 +1,213 @@
 module LeaseMachines
   VERSION: String
-  class Lease
-    def owner: () -> Integer
-    def token: () -> Integer
-    def expires_at: () -> Float
+  REFUSALS: Array[Symbol]
+  HOLDER_STATES: Array[Symbol]
+  CLOCK_POLICIES: Array[Symbol]
+
+  # Integer nanoseconds on one monotonic clock, for instants (now, expires_at,
+  # observed, confirmed_at) and spans (ttl, a cadence) alike:
+  # Process.clock_gettime(Process::CLOCK_MONOTONIC, :nanosecond). A non-Integer
+  # raises TypeError; a negative value, or one past what the core's Duration
+  # holds (2**64 seconds), raises RangeError.
+  type nanoseconds = Integer
+  # The caller's owner identity, the core's `OwnerId`: an Integer in 0..2**64-1.
+  type owner = Integer
+  # A scope: an Integer in 0..65_535 (TypeError / RangeError otherwise).
+  type scope = Integer
+  # The core's `ClockPolicy`. Anything else raises: TypeError for a non-Symbol,
+  # ArgumentError for another Symbol.
+  type clock_policy = :reject | :clamp
+  # The core's `HolderState`.
+  type holder_state = :confirmed | :unconfirmed | :at_risk | :expired | :fenced
+  # Every symbol that means "this call was not honoured and changed nothing":
+  # one per core `Refusal` variant, no catch-all. Each method below lists
+  # exactly the ones it can answer.
+  type refusal = :occupied | :held | :no_lease | :wrong_owner | :stale_token | :unknown | :expired
+               | :clock_regressed | :invalid_ttl | :exhausted | :fenced | :out_of_phase
+  # Refusals `renew` and `release` share: the token, the clock, the grant.
+  type held_refusal = :unknown | :clock_regressed | :no_lease | :wrong_owner | :stale_token | :expired
+  # The core's `Recording`: :recorded the first time, :duplicate for an
+  # idempotent repeat that changed nothing.
+  type recording = :recorded | :duplicate
+
+  # Anything read as a fencing token: this gem's FencingToken, or a sibling
+  # gem's of the same shape (ElectionMachines::FencingToken,
+  # HandoffMachines::FencingToken). `raw` is validated like `from_raw`:
+  # TypeError for a non-Integer, RangeError outside 1..2**64-1 or for a
+  # sequence number of zero. A bare Integer is not one (TypeError).
+  interface _FencingToken
+    def raw: () -> Integer
   end
-  class Checkpoint
-    def last_issued: () -> Integer?
-    def observed: () -> Float
+
+  # Anything read as a lease: this gem's Lease, or a sibling gem's.
+  interface _Lease
+    def owner: () -> owner
+    def token: () -> _FencingToken
+    def expires_at: () -> nanoseconds
   end
-  class Decision < Data
-    attr_reader status: Symbol
+
+  # Anything read as a checkpoint: this gem's Checkpoint, or a sibling gem's.
+  interface _Checkpoint
+    def scope: () -> scope
+    def issued: () -> Integer
+    def lease: () -> _Lease?
+    def observed: () -> nanoseconds
+  end
+
+  class FencingToken < Data
+    # Scope in the top 16 bits above a sequence number counted from 1.
+    attr_reader raw: Integer
+    # RangeError when the sequence number is zero or `raw` is outside
+    # 0..2**64-1; TypeError for a non-Integer.
+    def self.new: (Integer raw) -> FencingToken
+                | (raw: Integer) -> FencingToken
+    def self.from_raw: (Integer raw) -> FencingToken
+    def scope: () -> scope
+    # nil when the two tokens are of different scopes.
+    def order: (_FencingToken other) -> (-1 | 0 | 1)?
+    # false across scopes.
+    def newer_than?: (_FencingToken other) -> bool
+  end
+
+  class Lease < Data
+    attr_reader owner: owner
+    attr_reader token: FencingToken
+    attr_reader expires_at: nanoseconds
+    def self.new: (owner owner, FencingToken token, nanoseconds expires_at) -> Lease
+                | (owner: owner, token: FencingToken, expires_at: nanoseconds) -> Lease
+  end
+
+  class Checkpoint < Data
+    attr_reader scope: scope
+    # How many tokens the history has issued; the sequence number of the last.
+    attr_reader issued: Integer
     attr_reader lease: Lease?
-    attr_reader reason: Symbol?
+    attr_reader observed: nanoseconds
+    # RangeError when `issued` is past 2**48-1, or `lease` does not carry
+    # token number `issued` of `scope`. `lease` is read by its readers and
+    # kept as this gem's Lease.
+    def self.new: (scope scope, Integer issued, _Lease? lease, nanoseconds observed) -> Checkpoint
+                | (scope: scope, issued: Integer, lease: _Lease?, observed: nanoseconds) -> Checkpoint
+    def self.from_parts: (scope scope, Integer issued, _Lease? lease, nanoseconds observed) -> Checkpoint
   end
-  class Authority
-    def self.new: () -> instance
-    def self.restore: (Checkpoint) -> instance
-    def acquire: (owner: Integer, now: Float, ttl: Float) -> Decision
-    def renew: (owner: Integer, token: Integer, now: Float, ttl: Float) -> Decision
-    def release: (owner: Integer, token: Integer, now: Float) -> Decision
+
+  class Cadence < Data
+    attr_reader ttl: nanoseconds
+    attr_reader renew_after: nanoseconds
+    attr_reader warn_before: nanoseconds
+    # RangeError unless ttl > 0, renew_after < ttl and warn_before <= ttl.
+    def self.new: (nanoseconds ttl, nanoseconds renew_after, nanoseconds warn_before) -> Cadence
+                | (ttl: nanoseconds, renew_after: nanoseconds, warn_before: nanoseconds) -> Cadence
+  end
+
+  # The core's `LeaseAuthority`. Honoured answers come first in every return
+  # type, then the refusals that method can answer. A refusal changes nothing,
+  # the observed clock included.
+  class LeaseAuthority
+    # A fresh token namespace in scope zero.
+    def self.new: () -> LeaseAuthority
+    # A fresh token namespace whose tokens carry `scope`.
+    def self.with_scope: (scope scope) -> LeaseAuthority
+    # RangeError when `checkpoint` is of another scope.
+    def self.restored: (scope scope, _Checkpoint checkpoint, clock_policy clock_policy) -> LeaseAuthority
+    # Changes this authority and answers it.
+    def with_clock_policy: (clock_policy clock_policy) -> self
+    def clock_policy: () -> clock_policy
+    def scope: () -> scope
+    def issued: () -> Integer
     def checkpoint: () -> Checkpoint
+    def acquire: (owner owner, nanoseconds now, nanoseconds ttl)
+                 -> (Lease | :clock_regressed | :invalid_ttl | :occupied | :held | :exhausted)
+    def reacquire: (owner owner, nanoseconds now, nanoseconds ttl)
+                   -> (Lease | :clock_regressed | :invalid_ttl | :occupied | :exhausted)
+    def renew: (owner owner, _FencingToken token, nanoseconds now, nanoseconds ttl)
+               -> (Lease | held_refusal | :invalid_ttl)
+    # The Lease that was released. A repeat is :no_lease.
+    def release: (owner owner, _FencingToken token, nanoseconds now) -> (Lease | held_refusal)
+
+    private
+
+    type row = [Integer, Integer, Integer]
+    type saved = [Integer, Integer, row?, Integer]
+    def self.native_with_scope: (Integer) -> LeaseAuthority
+    def self.native_restored: (Integer, saved, Symbol) -> LeaseAuthority
+    def native_with_clock_policy: (Symbol) -> nil
+    def native_checkpoint: () -> saved
+    def native_acquire: (Integer, Integer, Integer) -> (row | refusal)
+    def native_reacquire: (Integer, Integer, Integer) -> (row | refusal)
+    def native_renew: (Integer, Integer, Integer, Integer) -> (row | refusal)
+    def native_release: (Integer, Integer, Integer) -> (row | refusal)
+    def decided: (row | refusal) -> (Lease | refusal)
   end
+
+  # The core's `Fence`, built for one scope.
   class Fence
-    def self.new: (?highest: Integer?) -> instance
-    def accept: (Integer) -> bool
-    def highest: () -> Integer?
+    # A resource that has accepted nothing, for scope zero.
+    def self.new: () -> Fence
+    def self.with_scope: (scope scope) -> Fence
+    # RangeError when `highest` is a token of another scope.
+    def self.resumed: (scope scope, _FencingToken? highest) -> Fence
+    def scope: () -> scope
+    def highest: () -> FencingToken?
+    # :advanced when the token is newer than every one accepted (persist it),
+    # :current when it equals the high-water mark (nothing changed). :unknown
+    # for a token of another scope, :stale_token for an older one.
+    def accept: (_FencingToken token) -> (:advanced | :current | :unknown | :stale_token)
+
+    private
+
+    def self.native_with_scope: (Integer) -> Fence
+    def self.native_resumed: (Integer, Integer?) -> Fence
+    def native_highest: () -> Integer?
+    def native_accept: (Integer) -> Symbol
+  end
+
+  # The core's `Holder`, following the tokens of one scope.
+  class Holder
+    def self.new: (_FencingToken token, nanoseconds confirmed_at, Cadence cadence) -> Holder
+    def state: () -> holder_state
+    def token: () -> FencingToken
+    def cadence: () -> Cadence
+    def renewal_due?: (nanoseconds now) -> bool
+    # nil once fenced.
+    def warning_deadline: () -> nanoseconds?
+    def at_risk?: (nanoseconds now) -> bool
+    # :started when an attempt begins now, :outstanding when one already was.
+    def refresh: (nanoseconds now) -> (:started | :outstanding | :fenced)
+    # :duplicate: already confirmed under `token`; nothing rescheduled.
+    def confirm: (_FencingToken token, nanoseconds at)
+                 -> (recording | :fenced | :unknown | :stale_token | :out_of_phase | :expired)
+    # :duplicate: already expired.
+    def expire: () -> (recording | :fenced)
+    # :duplicate: already confirmed under `token`; nothing rescheduled.
+    def reacquire: (_FencingToken token, nanoseconds at)
+                   -> (recording | :fenced | :unknown | :stale_token | :out_of_phase)
+    # Cannot refuse; fencing a fenced holder changes nothing.
+    def fence: () -> nil
+
+    private
+
+    def self.native_new: (Integer, Integer, [Integer, Integer, Integer]) -> Holder
+    def native_token: () -> Integer
+    def native_cadence: () -> [Integer, Integer, Integer]
+    def native_confirm: (Integer, Integer) -> Symbol
+    def native_reacquire: (Integer, Integer) -> Symbol
+  end
+
+  private
+
+  def self.native_token_scope: (Integer) -> Integer
+  def self.native_token_order: (Integer, Integer) -> (-1 | 0 | 1)?
+  def self.native_token_newer: (Integer, Integer) -> bool
+  def self.native_cadence: ([Integer, Integer, Integer]) -> nil
+  def self.native_checkpoint: ([Integer, Integer, [Integer, Integer, Integer]?, Integer]) -> nil
+
+  module Rows
+    def self?.read: (untyped value, Symbol reader, String what) -> untyped
+    def self?.raw: (_FencingToken) -> Integer
+    def self?.lease: (_Lease) -> [Integer, Integer, Integer]
+    def self?.to_lease: ([Integer, Integer, Integer]) -> Lease
+    def self?.checkpoint: (_Checkpoint) -> [Integer, Integer, [Integer, Integer, Integer]?, Integer]
+    def self?.cadence: (Cadence) -> [Integer, Integer, Integer]
   end
 end

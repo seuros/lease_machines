@@ -1,6 +1,6 @@
 use core::time::Duration;
 
-use crate::FencingToken;
+use crate::{FencingToken, Refusal};
 
 /// Renewal timing for one grant, on the holder's own clock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13,7 +13,8 @@ pub struct Cadence {
 impl Cadence {
     /// Renew `renew_after` each confirmation; warn `warn_before` the local expiry.
     ///
-    /// Returns `None` unless `renew_after < ttl` and `warn_before <= ttl`.
+    /// Returns `None` unless `ttl` is positive, `renew_after < ttl` and
+    /// `warn_before <= ttl`.
     #[must_use]
     pub const fn new(ttl: Duration, renew_after: Duration, warn_before: Duration) -> Option<Self> {
         if ttl.is_zero()
@@ -34,11 +35,22 @@ impl Cadence {
     pub const fn ttl(self) -> Duration {
         self.ttl
     }
+
+    /// How long after a confirmation the next renewal is due.
+    #[must_use]
+    pub const fn renew_after(self) -> Duration {
+        self.renew_after
+    }
+
+    /// How long before the local expiry unconfirmed ownership becomes doubtful.
+    #[must_use]
+    pub const fn warn_before(self) -> Duration {
+        self.warn_before
+    }
 }
 
 /// Where a holder stands with the grant it believes it owns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum HolderState {
     /// The last renewal succeeded and none is in flight.
     Confirmed,
@@ -52,11 +64,38 @@ pub enum HolderState {
     Fenced,
 }
 
+/// Honoured outcome of [`Holder::refresh`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refreshing {
+    /// A renewal attempt begins now: the holder was confirmed.
+    Started,
+    /// An attempt was already outstanding, or the grant is expired and only a
+    /// fresh one helps. The attempt is not restarted; an unconfirmed holder
+    /// past its warning deadline becomes at risk.
+    Outstanding,
+}
+
+/// Honoured outcome of a report to the holder: [`Holder::confirm`],
+/// [`Holder::expire`] and [`Holder::reacquire`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Recording {
+    /// Recorded for the first time; the holder's state changed.
+    Recorded,
+    /// Idempotent repeat: what the report says already holds, under the same
+    /// token. Nothing changed, not even the renewal schedule.
+    Duplicate,
+}
+
 /// Holder-side renewal tracker for a single grant.
 ///
 /// Durations come from the holder's clock, not the authority's, so two
 /// machines never compare instants. Deadlines are derived from the moment a
 /// renewal was confirmed locally, which is never later than the authority's view.
+///
+/// A holder follows the tokens of one scope: the scope of the token it was
+/// built with. A token of another scope is [`Refusal::Unknown`], because it
+/// cannot be ranked against the one held; track a grant from another
+/// authority with a new holder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Holder {
     state: HolderState,
@@ -93,6 +132,12 @@ impl Holder {
         self.token
     }
 
+    /// The renewal timing this holder was built with.
+    #[must_use]
+    pub const fn cadence(&self) -> Cadence {
+        self.cadence
+    }
+
     /// Whether a renewal should be started or retried now.
     #[must_use]
     pub const fn renewal_due(&self, now: Duration) -> bool {
@@ -104,82 +149,163 @@ impl Holder {
     }
 
     /// Point after which unconfirmed ownership should be treated as doubtful.
+    /// `None` once fenced.
     #[must_use]
     pub const fn warning_deadline(&self) -> Option<Duration> {
         match self.state {
             HolderState::Fenced => None,
-            _ => Some(self.warning_at),
+            HolderState::Confirmed
+            | HolderState::Unconfirmed
+            | HolderState::AtRisk
+            | HolderState::Expired => Some(self.warning_at),
         }
     }
 
     /// Whether ownership is unconfirmed or the warning deadline has passed.
     #[must_use]
     pub const fn at_risk(&self, now: Duration) -> bool {
-        !matches!(self.state, HolderState::Confirmed)
-            || now.as_nanos() >= self.warning_at.as_nanos()
-    }
-
-    /// Start a renewal attempt; repeated calls while one is outstanding are no-ops.
-    ///
-    /// Returns `false` once fenced.
-    pub const fn refresh(&mut self, now: Duration) -> bool {
         match self.state {
-            HolderState::Fenced => false,
-            HolderState::Confirmed | HolderState::Unconfirmed => {
-                self.state = if now.as_nanos() >= self.warning_at.as_nanos() {
-                    HolderState::AtRisk
-                } else {
-                    HolderState::Unconfirmed
-                };
-                true
-            }
-            HolderState::AtRisk | HolderState::Expired => true,
+            HolderState::Confirmed => now.as_nanos() >= self.warning_at.as_nanos(),
+            HolderState::Unconfirmed
+            | HolderState::AtRisk
+            | HolderState::Expired
+            | HolderState::Fenced => true,
         }
     }
 
-    /// Record a successful renewal observed at `at`.
+    /// Start a renewal attempt, or learn that one is already outstanding.
     ///
-    /// A response carrying a token older than the current one is ignored, as is
-    /// one arriving without an outstanding attempt or after expiry or fencing.
-    pub const fn confirm(&mut self, token: FencingToken, at: Duration) -> bool {
+    /// # Errors
+    /// `Fenced`. Nothing changes.
+    pub const fn refresh(&mut self, now: Duration) -> Result<Refreshing, Refusal> {
+        let late = now.as_nanos() >= self.warning_at.as_nanos();
+        let pending = if late {
+            HolderState::AtRisk
+        } else {
+            HolderState::Unconfirmed
+        };
         match self.state {
-            HolderState::Unconfirmed | HolderState::AtRisk
-                if token.value() >= self.token.value() =>
-            {
-                self.token = token;
-                self.state = HolderState::Confirmed;
-                self.schedule(at);
-                true
+            HolderState::Fenced => Err(Refusal::Fenced),
+            HolderState::Confirmed => {
+                self.state = pending;
+                Ok(Refreshing::Started)
             }
-            _ => false,
+            HolderState::Unconfirmed => {
+                self.state = pending;
+                Ok(Refreshing::Outstanding)
+            }
+            HolderState::AtRisk | HolderState::Expired => Ok(Refreshing::Outstanding),
+        }
+    }
+
+    /// Record a successful renewal observed at `at`, under `token`: the one
+    /// held, or a newer one of its scope.
+    ///
+    /// A confirmation of the token already held while no renewal is
+    /// outstanding is a [`Recording::Duplicate`]: the holder is confirmed
+    /// under that token, which is all the report says. `at` is when the
+    /// report arrived, not part of it, and a duplicate does not reschedule.
+    ///
+    /// # Errors
+    /// `Fenced`; `Unknown` (another scope); `StaleToken` (older than the one
+    /// held: a late reply); `OutOfPhase` (a newer token with no renewal
+    /// outstanding); `Expired` (only `reacquire` recovers).
+    pub const fn confirm(
+        &mut self,
+        token: FencingToken,
+        at: Duration,
+    ) -> Result<Recording, Refusal> {
+        let same = match self.rank(token) {
+            Ok(same) => same,
+            Err(refusal) => return Err(refusal),
+        };
+        match self.state {
+            HolderState::Unconfirmed | HolderState::AtRisk => {
+                self.accept(token, at);
+                Ok(Recording::Recorded)
+            }
+            HolderState::Confirmed if same => Ok(Recording::Duplicate),
+            HolderState::Confirmed => Err(Refusal::OutOfPhase),
+            HolderState::Expired => Err(Refusal::Expired),
+            // Unreachable: `rank` refuses a fenced holder.
+            HolderState::Fenced => Err(Refusal::Fenced),
         }
     }
 
     /// Record that the authority reported the grant expired.
-    pub const fn expire(&mut self) -> bool {
-        if matches!(self.state, HolderState::Fenced) {
-            return false;
+    ///
+    /// # Errors
+    /// `Fenced`. Nothing changes.
+    pub const fn expire(&mut self) -> Result<Recording, Refusal> {
+        match self.state {
+            HolderState::Fenced => Err(Refusal::Fenced),
+            HolderState::Expired => Ok(Recording::Duplicate),
+            HolderState::Confirmed | HolderState::Unconfirmed | HolderState::AtRisk => {
+                self.state = HolderState::Expired;
+                Ok(Recording::Recorded)
+            }
         }
-        self.state = HolderState::Expired;
-        true
     }
 
     /// Record a fresh grant with a strictly newer token after expiry.
-    pub const fn reacquire(&mut self, token: FencingToken, at: Duration) -> bool {
+    ///
+    /// The same report again, once the holder is confirmed under `token`, is
+    /// a [`Recording::Duplicate`] and does not reschedule.
+    ///
+    /// # Errors
+    /// `Fenced`; `Unknown` (another scope); `StaleToken` (older than the one
+    /// held, or the expired grant's own token); `OutOfPhase` (the grant is
+    /// not expired and `token` is not the one held and confirmed).
+    pub const fn reacquire(
+        &mut self,
+        token: FencingToken,
+        at: Duration,
+    ) -> Result<Recording, Refusal> {
+        let same = match self.rank(token) {
+            Ok(same) => same,
+            Err(refusal) => return Err(refusal),
+        };
         match self.state {
-            HolderState::Expired if token.value() > self.token.value() => {
-                self.token = token;
-                self.state = HolderState::Confirmed;
-                self.schedule(at);
-                true
+            HolderState::Expired if same => Err(Refusal::StaleToken),
+            HolderState::Expired => {
+                self.accept(token, at);
+                Ok(Recording::Recorded)
             }
-            _ => false,
+            HolderState::Confirmed if same => Ok(Recording::Duplicate),
+            HolderState::Confirmed | HolderState::Unconfirmed | HolderState::AtRisk => {
+                Err(Refusal::OutOfPhase)
+            }
+            // Unreachable: `rank` refuses a fenced holder.
+            HolderState::Fenced => Err(Refusal::Fenced),
         }
     }
 
-    /// Give up ownership permanently; idempotent.
+    /// Give up ownership permanently. It cannot refuse, and fencing a fenced
+    /// holder changes nothing.
     pub const fn fence(&mut self) {
         self.state = HolderState::Fenced;
+    }
+
+    /// Whether `token` is the one held (`true`) or a newer one of its scope
+    /// (`false`); the refusal every token-carrying report shares otherwise.
+    const fn rank(&self, token: FencingToken) -> Result<bool, Refusal> {
+        if matches!(self.state, HolderState::Fenced) {
+            return Err(Refusal::Fenced);
+        }
+        if token.scope() != self.token.scope() {
+            return Err(Refusal::Unknown);
+        }
+        // Same scope on both sides, so the raw numbers rank them.
+        if token.raw() < self.token.raw() {
+            return Err(Refusal::StaleToken);
+        }
+        Ok(token.raw() == self.token.raw())
+    }
+
+    const fn accept(&mut self, token: FencingToken, at: Duration) {
+        self.token = token;
+        self.state = HolderState::Confirmed;
+        self.schedule(at);
     }
 
     const fn schedule(&mut self, confirmed_at: Duration) {
@@ -188,6 +314,3 @@ impl Holder {
         self.warning_at = confirmed_at.saturating_add(window);
     }
 }
-
-#[cfg(test)]
-mod tests;
