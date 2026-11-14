@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.0](https://github.com/seuros/lease_machines/compare/lease_machines/v0.3.0...lease_machines/v0.4.0) (2026-11-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* adopt matryona-machines 0.2: shared instant, exact field reads, compiler-checked symbol tables
+
+### Features
+
+* adopt matryona-machines 0.2: shared instant, exact field reads, compiler-checked symbol tables ([24fc8e1](https://github.com/seuros/lease_machines/commit/24fc8e10dad7079c101fe5388ec58a147d87b78b))
+
 ## [0.3.0](https://github.com/seuros/lease_machines/compare/lease_machines/v0.2.0...lease_machines/v0.3.0) (2026-11-14)
 
 
