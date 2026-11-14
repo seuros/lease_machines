@@ -57,6 +57,12 @@ class ForgedTest < Minitest::Test
     end
   end
 
+  def test_a_subclass_instance_is_refused_like_any_other_value
+    forged = leaked_token.new(raw: token(SCOPE, 1).raw)
+    error = assert_raises(TypeError) { L::Fence.with_scope(SCOPE).accept(forged) }
+    assert_equal 'expected a LeaseMachines::FencingToken or a value with #raw', error.message
+  end
+
   def test_a_marshalled_token_is_validated_again
     forged = forge(L::FencingToken.new(1), "i\x06".b, "i\x00".b)
     assert_equal 0, forged.raw
