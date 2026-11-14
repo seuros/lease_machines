@@ -1,58 +1,44 @@
 //! Symbol names for the core's enums. Every match is exhaustive: a new
 //! variant fails to compile here until it has a name.
 use lease_machines::{Accepting, ClockPolicy, HolderState, Recording, Refreshing, Refusal};
-use magnus::{Error, Ruby, Symbol, TryConvert, Value};
+use magnus::{Ruby, Symbol};
+use matryona_machines::ruby::{Symbols, symbol};
 
-pub const REFUSALS: [&str; 12] = [
-    "occupied",
-    "held",
-    "no_lease",
-    "wrong_owner",
-    "stale_token",
-    "unknown",
-    "expired",
-    "clock_regressed",
-    "invalid_ttl",
-    "exhausted",
-    "fenced",
-    "out_of_phase",
-];
-
-pub const HOLDER_STATES: [&str; 5] = ["confirmed", "unconfirmed", "at_risk", "expired", "fenced"];
-
-pub const CLOCK_POLICIES: [&str; 2] = ["reject", "clamp"];
-
-pub const fn refusal(refusal: Refusal) -> &'static str {
-    match refusal {
-        Refusal::Occupied => "occupied",
-        Refusal::Held => "held",
-        Refusal::NoLease => "no_lease",
-        Refusal::WrongOwner => "wrong_owner",
-        Refusal::StaleToken => "stale_token",
-        Refusal::Unknown => "unknown",
-        Refusal::Expired => "expired",
-        Refusal::ClockRegressed => "clock_regressed",
-        Refusal::InvalidTtl => "invalid_ttl",
-        Refusal::Exhausted => "exhausted",
-        Refusal::Fenced => "fenced",
-        Refusal::OutOfPhase => "out_of_phase",
+matryona_machines::symbols! {
+    /// The core's refusals as Symbols: the snake case of each variant.
+    pub Refusals for Refusal as "a refusal" {
+        Occupied => "occupied",
+        Held => "held",
+        NoLease => "no_lease",
+        WrongOwner => "wrong_owner",
+        StaleToken => "stale_token",
+        Unknown => "unknown",
+        Expired => "expired",
+        ClockRegressed => "clock_regressed",
+        InvalidTtl => "invalid_ttl",
+        Exhausted => "exhausted",
+        Fenced => "fenced",
+        OutOfPhase => "out_of_phase",
     }
 }
 
-pub const fn holder_state(state: HolderState) -> &'static str {
-    match state {
-        HolderState::Confirmed => "confirmed",
-        HolderState::Unconfirmed => "unconfirmed",
-        HolderState::AtRisk => "at_risk",
-        HolderState::Expired => "expired",
-        HolderState::Fenced => "fenced",
+matryona_machines::symbols! {
+    /// The holder's states as Symbols.
+    pub HolderStates for HolderState as "a holder state" {
+        Confirmed => "confirmed",
+        Unconfirmed => "unconfirmed",
+        AtRisk => "at_risk",
+        Expired => "expired",
+        Fenced => "fenced",
     }
 }
 
-pub const fn clock_policy(policy: ClockPolicy) -> &'static str {
-    match policy {
-        ClockPolicy::Reject => "reject",
-        ClockPolicy::Clamp => "clamp",
+matryona_machines::symbols! {
+    /// The authority's clock policies as Symbols: `TypeError` for a
+    /// non-Symbol, `RangeError` for another Symbol.
+    pub ClockPolicies for ClockPolicy as "clock policy" {
+        Reject => "reject",
+        Clamp => "clamp",
     }
 }
 
@@ -78,10 +64,11 @@ const fn refreshing(outcome: Refreshing) -> &'static str {
 }
 
 fn answer<T>(ruby: &Ruby, outcome: Result<T, Refusal>, name: fn(T) -> &'static str) -> Symbol {
-    ruby.to_symbol(match outcome {
+    let name = match outcome {
         Ok(honoured) => name(honoured),
-        Err(refused) => refusal(refused),
-    })
+        Err(refused) => Refusals::name(refused),
+    };
+    symbol(ruby, name)
 }
 
 pub fn accepted(ruby: &Ruby, outcome: Result<Accepting, Refusal>) -> Symbol {
@@ -94,28 +81,4 @@ pub fn recorded(ruby: &Ruby, outcome: Result<Recording, Refusal>) -> Symbol {
 
 pub fn refreshed(ruby: &Ruby, outcome: Result<Refreshing, Refusal>) -> Symbol {
     answer(ruby, outcome, refreshing)
-}
-
-/// A clock policy named by its symbol.
-#[derive(Clone, Copy)]
-pub struct Policy(pub ClockPolicy);
-
-impl TryConvert for Policy {
-    fn try_convert(value: Value) -> Result<Self, Error> {
-        let ruby = Ruby::get_with(value);
-        let symbol = Symbol::from_value(value).ok_or_else(|| {
-            Error::new(ruby.exception_type_error(), "clock policy must be a Symbol")
-        })?;
-        let name = symbol.name()?;
-        [ClockPolicy::Reject, ClockPolicy::Clamp]
-            .into_iter()
-            .find(|policy| clock_policy(*policy) == name)
-            .map(Self)
-            .ok_or_else(|| {
-                Error::new(
-                    ruby.exception_range_error(),
-                    "clock policy must be :reject or :clamp",
-                )
-            })
-    }
 }

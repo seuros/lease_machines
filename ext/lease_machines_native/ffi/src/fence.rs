@@ -1,42 +1,48 @@
 //! `LeaseMachines::Fence`, and what `FencingToken` asks of the core.
 use std::{cell::RefCell, cmp::Ordering};
 
-use magnus::{Error, Ruby, Symbol, prelude::*, typed_data::Obj};
+use magnus::{Error, Ruby, Symbol, Value, prelude::*, typed_data::Obj};
+use matryona_machines::ruby::integer;
 
-use crate::values::TokenValue;
-use crate::{Scope, names};
+use crate::{names, values::token};
 
 type Core = lease_machines::Fence;
 
 /// `FencingToken#scope`; reading the token is what validates it.
-pub const fn token_scope(token: TokenValue) -> u16 {
-    token.0.scope()
+pub fn token_scope(ruby: &Ruby, held: Value) -> Result<u16, Error> {
+    token(ruby, held).map(lease_machines::FencingToken::scope)
 }
 
 /// `FencingToken#order`: -1, 0, 1, or `nil` across scopes.
-pub fn token_order(token: TokenValue, other: TokenValue) -> Option<i8> {
-    token.0.order(other.0).map(|order| match order {
+pub fn token_order(ruby: &Ruby, held: Value, other: Value) -> Result<Option<i8>, Error> {
+    let (held, other) = (token(ruby, held)?, token(ruby, other)?);
+    Ok(held.order(other).map(|order| match order {
         Ordering::Less => -1,
         Ordering::Equal => 0,
         Ordering::Greater => 1,
-    })
+    }))
 }
 
 /// `FencingToken#newer_than?`.
-pub const fn token_newer(token: TokenValue, other: TokenValue) -> bool {
-    token.0.is_newer_than(other.0)
+pub fn token_newer(ruby: &Ruby, held: Value, other: Value) -> Result<bool, Error> {
+    let (held, other) = (token(ruby, held)?, token(ruby, other)?);
+    Ok(held.is_newer_than(other))
 }
 
 #[magnus::wrap(class = "LeaseMachines::Fence", free_immediately, size)]
 pub struct Fence(RefCell<Core>);
 
 impl Fence {
-    pub const fn with_scope(scope: Scope) -> Self {
-        Self(RefCell::new(Core::with_scope(scope.0)))
+    pub fn with_scope(scope: Value) -> Result<Self, Error> {
+        Ok(Self(RefCell::new(Core::with_scope(integer(
+            scope, "scope",
+        )?))))
     }
 
-    pub fn resumed(ruby: &Ruby, scope: Scope, highest: Option<TokenValue>) -> Result<Self, Error> {
-        Core::resumed(scope.0, highest.map(|token| token.0))
+    pub fn resumed(ruby: &Ruby, scope: Value, highest: Option<Value>) -> Result<Self, Error> {
+        let scope = integer(scope, "scope")?;
+        let highest = highest.map(|held| token(ruby, held)).transpose()?;
+        Core::resumed(scope, highest)
             .map(|core| Self(RefCell::new(core)))
             .ok_or_else(|| {
                 Error::new(
@@ -57,9 +63,10 @@ impl Fence {
             .map(lease_machines::FencingToken::raw)
     }
 
-    pub fn accept(ruby: &Ruby, this: Obj<Self>, token: TokenValue) -> Result<Symbol, Error> {
+    pub fn accept(ruby: &Ruby, this: Obj<Self>, held: Value) -> Result<Symbol, Error> {
         this.check_frozen()?;
-        let outcome = this.0.borrow_mut().accept(token.0);
+        let held = token(ruby, held)?;
+        let outcome = this.0.borrow_mut().accept(held);
         Ok(names::accepted(ruby, outcome))
     }
 }

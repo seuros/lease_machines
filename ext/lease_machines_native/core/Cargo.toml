@@ -13,5 +13,8 @@ exclude = ["src/**/tests.rs", "src/tests/", "tests/"]
 [dependencies]
 periscope-machines.workspace = true
 
+[dev-dependencies]
+matryona-machines = { workspace = true, features = ["testing"] }
+
 [lints]
 workspace = true

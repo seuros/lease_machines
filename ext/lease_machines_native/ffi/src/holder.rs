@@ -1,20 +1,22 @@
 //! `LeaseMachines::Holder` and the cadence it is built with.
-use std::cell::RefCell;
+use std::{cell::RefCell, time::Duration};
 
 use lease_machines::Cadence;
-use magnus::{Error, Ruby, Symbol, prelude::*, typed_data::Obj};
+use magnus::{Error, Integer, Ruby, Symbol, Value, prelude::*, typed_data::Obj};
+use matryona_machines::ruby::{Symbols, instant, nanoseconds};
 
-use crate::values::{CadenceValue, TokenValue};
-use crate::{Nanos, names};
+use crate::{names, values};
 
 type Core = lease_machines::Holder;
 
-/// A cadence as `[ttl, renew_after, warn_before]`.
-type Timing = (Nanos, Nanos, Nanos);
-
 /// `Cadence::new`, or the `RangeError` its `None` stands for.
-pub fn cadence(ruby: &Ruby, timing: Timing) -> Result<Cadence, Error> {
-    Cadence::new(timing.0.0, timing.1.0, timing.2.0).ok_or_else(|| {
+pub fn cadence(
+    ruby: &Ruby,
+    ttl: Duration,
+    renew_after: Duration,
+    warn_before: Duration,
+) -> Result<Cadence, Error> {
+    Cadence::new(ttl, renew_after, warn_before).ok_or_else(|| {
         Error::new(
             ruby.exception_range_error(),
             "cadence needs a positive ttl, renew_after < ttl and warn_before <= ttl",
@@ -26,53 +28,61 @@ pub fn cadence(ruby: &Ruby, timing: Timing) -> Result<Cadence, Error> {
 pub struct Holder(RefCell<Core>);
 
 impl Holder {
-    pub const fn new(token: TokenValue, confirmed_at: Nanos, cadence: CadenceValue) -> Self {
-        Self(RefCell::new(Core::new(token.0, confirmed_at.0, cadence.0)))
+    pub fn new(
+        ruby: &Ruby,
+        token: Value,
+        confirmed_at: Value,
+        cadence: Value,
+    ) -> Result<Self, Error> {
+        let token = values::token(ruby, token)?;
+        let confirmed_at = instant(confirmed_at, "confirmed_at")?;
+        let cadence = values::cadence(ruby, cadence)?;
+        Ok(Self(RefCell::new(Core::new(token, confirmed_at, cadence))))
     }
 
     pub fn state(ruby: &Ruby, this: &Self) -> Symbol {
-        ruby.to_symbol(names::holder_state(this.0.borrow().state()))
+        names::HolderStates::symbol(ruby, this.0.borrow().state())
     }
 
     pub fn token(&self) -> u64 {
         self.0.borrow().token().raw()
     }
 
-    pub fn cadence(&self) -> (u128, u128, u128) {
-        let cadence = self.0.borrow().cadence();
+    pub fn cadence(ruby: &Ruby, this: &Self) -> (Integer, Integer, Integer) {
+        let cadence = this.0.borrow().cadence();
         (
-            cadence.ttl().as_nanos(),
-            cadence.renew_after().as_nanos(),
-            cadence.warn_before().as_nanos(),
+            nanoseconds(ruby, cadence.ttl()),
+            nanoseconds(ruby, cadence.renew_after()),
+            nanoseconds(ruby, cadence.warn_before()),
         )
     }
 
-    pub fn renewal_due(&self, now: Nanos) -> bool {
-        self.0.borrow().renewal_due(now.0)
+    pub fn renewal_due(&self, now: Value) -> Result<bool, Error> {
+        let now = instant(now, "now")?;
+        Ok(self.0.borrow().renewal_due(now))
     }
 
-    pub fn warning_deadline(&self) -> Option<u128> {
-        self.0.borrow().warning_deadline().map(|at| at.as_nanos())
+    pub fn warning_deadline(ruby: &Ruby, this: &Self) -> Option<Integer> {
+        let deadline = this.0.borrow().warning_deadline();
+        deadline.map(|at| nanoseconds(ruby, at))
     }
 
-    pub fn at_risk(&self, now: Nanos) -> bool {
-        self.0.borrow().at_risk(now.0)
+    pub fn at_risk(&self, now: Value) -> Result<bool, Error> {
+        let now = instant(now, "now")?;
+        Ok(self.0.borrow().at_risk(now))
     }
 
-    pub fn refresh(ruby: &Ruby, this: Obj<Self>, now: Nanos) -> Result<Symbol, Error> {
+    pub fn refresh(ruby: &Ruby, this: Obj<Self>, now: Value) -> Result<Symbol, Error> {
         this.check_frozen()?;
-        let outcome = this.0.borrow_mut().refresh(now.0);
+        let now = instant(now, "now")?;
+        let outcome = this.0.borrow_mut().refresh(now);
         Ok(names::refreshed(ruby, outcome))
     }
 
-    pub fn confirm(
-        ruby: &Ruby,
-        this: Obj<Self>,
-        token: TokenValue,
-        at: Nanos,
-    ) -> Result<Symbol, Error> {
+    pub fn confirm(ruby: &Ruby, this: Obj<Self>, token: Value, at: Value) -> Result<Symbol, Error> {
         this.check_frozen()?;
-        let outcome = this.0.borrow_mut().confirm(token.0, at.0);
+        let (token, at) = (values::token(ruby, token)?, instant(at, "at")?);
+        let outcome = this.0.borrow_mut().confirm(token, at);
         Ok(names::recorded(ruby, outcome))
     }
 
@@ -85,11 +95,12 @@ impl Holder {
     pub fn reacquire(
         ruby: &Ruby,
         this: Obj<Self>,
-        token: TokenValue,
-        at: Nanos,
+        token: Value,
+        at: Value,
     ) -> Result<Symbol, Error> {
         this.check_frozen()?;
-        let outcome = this.0.borrow_mut().reacquire(token.0, at.0);
+        let (token, at) = (values::token(ruby, token)?, instant(at, "at")?);
+        let outcome = this.0.borrow_mut().reacquire(token, at);
         Ok(names::recorded(ruby, outcome))
     }
 

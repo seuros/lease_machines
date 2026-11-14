@@ -6,15 +6,16 @@
 //! field is then converted and the value rebuilt through the core
 //! constructor, so a forged value raises before it reaches the core.
 use lease_machines::{Cadence, Checkpoint, FencingToken, Lease, OwnerId};
-use magnus::{Error, Ruby, TryConvert, Value, prelude::*};
+use magnus::{Error, Ruby, Value, prelude::*};
+use matryona_machines::ruby::{instant, integer, nanoseconds};
 
 use crate::classes::{Origin, classes, fields};
-use crate::{Nanos, Number, Scope, Token, authority, holder};
+use crate::{authority, holder, raw_token};
 
 /// A token as the core's: this gem's `FencingToken` or a sibling's.
 pub fn token(ruby: &Ruby, value: Value) -> Result<FencingToken, Error> {
     let [raw] = fields(ruby, value, classes(ruby)?.token, ["raw"], Origin::Sibling)?;
-    Ok(Token::try_convert(raw)?.0)
+    raw_token(raw)
 }
 
 /// A lease as the core's: this gem's `Lease` or a sibling's.
@@ -22,9 +23,9 @@ pub fn lease(ruby: &Ruby, value: Value) -> Result<Lease, Error> {
     let readers = ["owner", "token", "expires_at"];
     let [owner, held, expires_at] =
         fields(ruby, value, classes(ruby)?.lease, readers, Origin::Sibling)?;
-    let owner = OwnerId::new(Number::try_convert(owner)?.0);
+    let owner = OwnerId::new(integer(owner, "owner")?);
     let held = token(ruby, held)?;
-    Ok(Lease::new(owner, held, Nanos::try_convert(expires_at)?.0))
+    Ok(Lease::new(owner, held, instant(expires_at, "expires_at")?))
 }
 
 /// A checkpoint as the core's: this gem's `Checkpoint` or a sibling's.
@@ -37,13 +38,13 @@ pub fn checkpoint(ruby: &Ruby, value: Value) -> Result<Checkpoint, Error> {
         readers,
         Origin::Sibling,
     )?;
-    let (scope, issued) = (Scope::try_convert(scope)?, Number::try_convert(issued)?);
+    let (scope, issued) = (integer(scope, "scope")?, integer(issued, "issued")?);
     let held = if held.is_nil() {
         None
     } else {
         Some(lease(ruby, held)?)
     };
-    authority::checkpoint(ruby, scope, issued, held, Nanos::try_convert(observed)?)
+    authority::checkpoint(ruby, scope, issued, held, instant(observed, "observed")?)
 }
 
 /// A cadence as the core's: only this gem's `Cadence`.
@@ -51,66 +52,47 @@ pub fn cadence(ruby: &Ruby, value: Value) -> Result<Cadence, Error> {
     let readers = ["ttl", "renew_after", "warn_before"];
     let [ttl, renew_after, warn_before] =
         fields(ruby, value, classes(ruby)?.cadence, readers, Origin::Own)?;
-    let timing = (
-        Nanos::try_convert(ttl)?,
-        Nanos::try_convert(renew_after)?,
-        Nanos::try_convert(warn_before)?,
-    );
-    holder::cadence(ruby, timing)
+    timing(ruby, ttl, renew_after, warn_before)
 }
 
-/// A token argument, read by [`token`].
-#[derive(Clone, Copy)]
-pub struct TokenValue(pub FencingToken);
-
-impl TryConvert for TokenValue {
-    fn try_convert(value: Value) -> Result<Self, Error> {
-        token(&Ruby::get_with(value), value).map(Self)
-    }
-}
-
-/// A checkpoint argument, read by [`checkpoint`].
-pub struct CheckpointValue(pub Checkpoint);
-
-impl TryConvert for CheckpointValue {
-    fn try_convert(value: Value) -> Result<Self, Error> {
-        checkpoint(&Ruby::get_with(value), value).map(Self)
-    }
-}
-
-/// A cadence argument, read by [`cadence`].
-#[derive(Clone, Copy)]
-pub struct CadenceValue(pub Cadence);
-
-impl TryConvert for CadenceValue {
-    fn try_convert(value: Value) -> Result<Self, Error> {
-        cadence(&Ruby::get_with(value), value).map(Self)
-    }
+/// `Cadence::new` of three spans, converted in order.
+fn timing(
+    ruby: &Ruby,
+    ttl: Value,
+    renew_after: Value,
+    warn_before: Value,
+) -> Result<Cadence, Error> {
+    let ttl = instant(ttl, "ttl")?;
+    let renew_after = instant(renew_after, "renew_after")?;
+    holder::cadence(ruby, ttl, renew_after, instant(warn_before, "warn_before")?)
 }
 
 /// A `LeaseMachines::FencingToken` of `token`, built by its `new`.
 pub fn token_object(ruby: &Ruby, token: FencingToken) -> Result<Value, Error> {
-    let class = ruby.get_inner(classes(ruby)?.token);
+    let class = classes(ruby)?.token.get(ruby);
     class.funcall("new", (token.raw(),))
 }
 
 /// A `LeaseMachines::Lease` of `lease`, built by its `new`.
 pub fn lease_object(ruby: &Ruby, lease: Lease) -> Result<Value, Error> {
-    let class = ruby.get_inner(classes(ruby)?.lease);
+    let class = classes(ruby)?.lease.get(ruby);
     let held = token_object(ruby, lease.token())?;
-    let fields = (lease.owner().value(), held, lease.expires_at().as_nanos());
-    class.funcall("new", fields)
+    let expires_at = nanoseconds(ruby, lease.expires_at());
+    class.funcall("new", (lease.owner().value(), held, expires_at))
 }
 
 /// `LeaseMachines.native_lease`: what `Lease.new` validates. Answers the
 /// token as this gem's own, to keep in place of the one given.
 pub fn validate_lease(
     ruby: &Ruby,
-    _owner: Number,
-    held: TokenValue,
-    _expires_at: Nanos,
+    owner: Value,
+    held: Value,
+    expires_at: Value,
 ) -> Result<Value, Error> {
-    token_object(ruby, held.0)
+    integer::<u64>(owner, "owner")?;
+    let held = token(ruby, held)?;
+    instant(expires_at, "expires_at")?;
+    token_object(ruby, held)
 }
 
 /// `LeaseMachines.native_checkpoint`: what `Checkpoint.new` validates.
@@ -118,11 +100,13 @@ pub fn validate_lease(
 /// given.
 pub fn validate_checkpoint(
     ruby: &Ruby,
-    scope: Scope,
-    issued: Number,
+    scope: Value,
+    issued: Value,
     held: Option<Value>,
-    observed: Nanos,
+    observed: Value,
 ) -> Result<Option<Value>, Error> {
+    let (scope, issued) = (integer(scope, "scope")?, integer(issued, "issued")?);
+    let observed = instant(observed, "observed")?;
     let held = held.map(|held| lease(ruby, held)).transpose()?;
     authority::checkpoint(ruby, scope, issued, held, observed)?;
     held.map(|held| lease_object(ruby, held)).transpose()
@@ -131,9 +115,9 @@ pub fn validate_checkpoint(
 /// `LeaseMachines.native_cadence`: what `Cadence.new` validates.
 pub fn validate_cadence(
     ruby: &Ruby,
-    ttl: Nanos,
-    renew_after: Nanos,
-    warn_before: Nanos,
+    ttl: Value,
+    renew_after: Value,
+    warn_before: Value,
 ) -> Result<(), Error> {
-    holder::cadence(ruby, (ttl, renew_after, warn_before)).map(drop)
+    timing(ruby, ttl, renew_after, warn_before).map(drop)
 }

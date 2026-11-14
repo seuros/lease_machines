@@ -1,23 +1,26 @@
 //! Private native entry point.
-use magnus::{Error, Ruby, function, method, prelude::*};
+use magnus::{Error, RArray, Ruby, function, method, prelude::*};
+use matryona_machines::ruby::Symbols;
 
 use crate::authority::LeaseAuthority;
 use crate::fence::{self, Fence};
 use crate::holder::Holder;
 use crate::{classes, names, values};
 
+/// Every Symbol of a table, in its order, frozen.
+fn every<T: Symbols>(ruby: &Ruby) -> RArray {
+    let list = ruby.ary_from_iter(T::ALL.iter().map(|variant| T::symbol(ruby, *variant)));
+    list.freeze();
+    list
+}
+
 #[magnus::init]
 fn init(ruby: &Ruby) -> Result<(), Error> {
     let module = ruby.define_module("LeaseMachines")?;
     classes::resolve(ruby, module)?;
-    let symbols = |names: &[&str]| {
-        let list = ruby.ary_from_iter(names.iter().map(|name| ruby.to_symbol(*name)));
-        list.freeze();
-        list
-    };
-    module.const_set("REFUSALS", symbols(&names::REFUSALS))?;
-    module.const_set("HOLDER_STATES", symbols(&names::HOLDER_STATES))?;
-    module.const_set("CLOCK_POLICIES", symbols(&names::CLOCK_POLICIES))?;
+    module.const_set("REFUSALS", every::<names::Refusals>(ruby))?;
+    module.const_set("HOLDER_STATES", every::<names::HolderStates>(ruby))?;
+    module.const_set("CLOCK_POLICIES", every::<names::ClockPolicies>(ruby))?;
     module.define_singleton_method("native_token_scope", function!(fence::token_scope, 1))?;
     module.define_singleton_method("native_token_order", function!(fence::token_order, 2))?;
     module.define_singleton_method("native_token_newer", function!(fence::token_newer, 2))?;

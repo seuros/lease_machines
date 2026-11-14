@@ -3,6 +3,7 @@
 //! clocks and a restore from checkpoint in the middle of the run.
 use std::{collections::BTreeSet, format, string::String, vec::Vec};
 
+use matryona_machines::testing::XorShift64;
 use periscope_machines::{SEQUENCE_MAX, sequence_of};
 
 use super::model::{Authority, Resource, Tracker};
@@ -10,32 +11,17 @@ use super::*;
 
 mod holding;
 
-struct Draws(u64);
+fn chance(draws: &mut XorShift64, percent: u64) -> bool {
+    draws.below(100) < percent
+}
 
-impl Draws {
-    fn next(&mut self) -> u64 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        self.0
-    }
-
-    fn below(&mut self, bound: u64) -> u64 {
-        self.next() % bound
-    }
-
-    fn chance(&mut self, percent: u64) -> bool {
-        self.below(100) < percent
-    }
-
-    /// One of `tokens`, which must not be empty.
-    fn pick(&mut self, tokens: &[FencingToken]) -> FencingToken {
-        tokens[usize::try_from(self.below(tokens.len() as u64)).unwrap()]
-    }
+/// One of `tokens`, which must not be empty.
+fn pick(draws: &mut XorShift64, tokens: &[FencingToken]) -> FencingToken {
+    tokens[usize::try_from(draws.below(tokens.len() as u64)).unwrap()]
 }
 
 struct Run {
-    draws: Draws,
+    draws: XorShift64,
     core: LeaseAuthority,
     model: Authority,
     fence: Fence,
@@ -59,7 +45,7 @@ fn label<T>(answer: &Result<T, Refusal>) -> String {
 
 impl Run {
     fn new(seed: u64) -> Self {
-        let mut draws = Draws(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+        let mut draws = XorShift64::new(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
         let scope = u16::try_from(1 + draws.below(u64::from(u16::MAX))).unwrap();
         let other = if scope == u16::MAX { 1 } else { scope + 1 };
         // Some histories begin a few tokens short of the end of their scope.
@@ -99,7 +85,7 @@ impl Run {
 
     /// The instant a call brings: usually the present, sometimes the past.
     fn instant(&mut self) -> Duration {
-        if self.draws.chance(15) {
+        if chance(&mut self.draws, 15) {
             return self.now.saturating_sub(at(1 + self.draws.below(4)));
         }
         self.now
@@ -127,7 +113,7 @@ impl Run {
                 self.rival.scope(),
                 1 + self.draws.below(self.model.issued().max(1)),
             ),
-            3 | 4 if !self.issued.is_empty() => self.draws.pick(&self.issued),
+            3 | 4 if !self.issued.is_empty() => pick(&mut self.draws, &self.issued),
             _ => self
                 .model
                 .lease()
@@ -137,14 +123,14 @@ impl Run {
 
     /// A token for a report to the holder: one some authority really issued.
     fn reported(&mut self) -> FencingToken {
-        if self.draws.chance(20) && !self.foreign.is_empty() {
+        if chance(&mut self.draws, 20) && !self.foreign.is_empty() {
             return self.pick_foreign();
         }
-        self.draws.pick(&self.issued)
+        pick(&mut self.draws, &self.issued)
     }
 
     fn pick_foreign(&mut self) -> FencingToken {
-        self.draws.pick(&self.foreign)
+        pick(&mut self.draws, &self.foreign)
     }
 
     /// One authority call against the model, clone-compared when refused:
@@ -208,13 +194,13 @@ impl Run {
     /// A write reaches the resource: under a token this authority issued, or
     /// one of the rival's. The fence sees no forged token of its own scope.
     fn write(&mut self) {
-        let token = if self.draws.chance(25) && !self.foreign.is_empty() {
+        let token = if chance(&mut self.draws, 25) && !self.foreign.is_empty() {
             self.pick_foreign()
         } else if let Some(newest) = self.issued.last().copied() {
-            if self.draws.chance(50) {
+            if chance(&mut self.draws, 50) {
                 newest
             } else {
-                self.draws.pick(&self.issued)
+                pick(&mut self.draws, &self.issued)
             }
         } else {
             return;

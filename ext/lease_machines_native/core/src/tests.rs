@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used)] // Failed test assumptions should panic.
 use core::{fmt::Debug, time::Duration};
 
+pub use matryona_machines::testing::{refuses, unchanged};
 use periscope_machines::scoped;
 
 use super::*;
@@ -29,27 +30,11 @@ pub fn token(scope: u16, sequence: u64) -> FencingToken {
     FencingToken::from_raw(scoped(scope, sequence)).unwrap()
 }
 
-/// The call is refused with `refusal` and leaves `subject` exactly as it was.
-pub fn refuses<S, T>(
-    subject: &mut S,
-    refusal: Refusal,
-    call: impl FnOnce(&mut S) -> Result<T, Refusal>,
-) where
-    S: Clone + PartialEq + Debug,
-    T: Debug + PartialEq,
-{
-    let before = subject.clone();
-    assert_eq!(call(subject), Err(refusal));
-    assert_eq!(*subject, before, "a refusal changed something");
-}
-
 /// The call is honoured with `answer` and still leaves `subject` as it was.
 pub fn repeats<S, T>(subject: &mut S, answer: T, call: impl FnOnce(&mut S) -> Result<T, Refusal>)
 where
     S: Clone + PartialEq + Debug,
     T: Debug + PartialEq,
 {
-    let before = subject.clone();
-    assert_eq!(call(subject), Ok(answer));
-    assert_eq!(*subject, before, "an honoured repeat changed something");
+    assert_eq!(unchanged(subject, call), Ok(answer));
 }

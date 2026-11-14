@@ -90,4 +90,26 @@ class ForgedTest < Minitest::Test
     assert_equal :advanced, L::Fence.with_scope(SCOPE).accept(held)
     assert_equal L::Lease.new(1, token(SCOPE, 1), 0), L::Lease.new(1, held, 0)
   end
+
+  # This gem's values are read from the struct, never through their readers:
+  # a redefined reader is ignored (a sibling's value is still read by its).
+  def test_a_redefined_reader_is_ignored
+    held = token(SCOPE, 1)
+    cadence = L::Cadence.new(at(30), at(10), at(5))
+    saved = L::Checkpoint.new(SCOPE, 1, L::Lease.new(1, held, at(5)), 0)
+    readers = { L::FencingToken => %i[raw], L::Lease => %i[owner token expires_at],
+                L::Checkpoint => %i[scope issued lease observed], L::Cadence => %i[ttl renew_after warn_before] }
+    originals = readers.flat_map { |klass, names| names.map { [klass, it, klass.instance_method(it)] } }
+    begin
+      originals.each { |klass, name, _| klass.define_method(name) { raise "#{name} reader ran" } }
+      accepted = L::Fence.with_scope(SCOPE).accept(held)
+      holder = L::Holder.new(held, 0, cadence)
+      restored = L::LeaseAuthority.restored(SCOPE, saved, :reject)
+    ensure
+      originals.each { |klass, name, reader| klass.define_method(name, reader) }
+    end
+    assert_equal :advanced, accepted
+    assert_equal cadence, holder.cadence
+    assert_equal saved, restored.checkpoint
+  end
 end

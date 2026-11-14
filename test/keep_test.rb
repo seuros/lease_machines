@@ -69,6 +69,22 @@ class KeepTest < Minitest::Test
     assert_raises(FrozenError) { holder.fence }
   end
 
+  # Frozen is checked before any argument is read: a frozen receiver handed a
+  # malformed argument raises FrozenError, as Ruby's own core methods do.
+  def test_frozen_is_checked_before_the_arguments
+    @authority.freeze
+    assert_raises(FrozenError) { @authority.acquire(1.5, 0, at(5)) }
+    assert_raises(FrozenError) { @authority.reacquire(1, nil, at(5)) }
+    assert_raises(FrozenError) { @authority.renew(1, :token, 0, at(1)) }
+    assert_raises(FrozenError) { @authority.release(-1, nil, 0) }
+    assert_raises(FrozenError) { @authority.with_clock_policy(:sometimes) }
+    assert_raises(FrozenError) { L::Fence.with_scope(SCOPE).freeze.accept(nil) }
+    holder = L::Holder.new(token(SCOPE, 1), 0, L::Cadence.new(at(30), at(10), at(5))).freeze
+    assert_raises(FrozenError) { holder.refresh('10') }
+    assert_raises(FrozenError) { holder.confirm(1, at(10)) }
+    assert_raises(FrozenError) { holder.reacquire(token(SCOPE, 2), -1) }
+  end
+
   # The binding holds its classes by address: they are pinned, so compaction
   # moves none of them and every path that checks or builds one still works.
   def test_classes_survive_compaction

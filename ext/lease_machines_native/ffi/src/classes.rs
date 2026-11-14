@@ -1,5 +1,6 @@
-//! The `Data` classes, resolved once at load, the rule every value read from
-//! Ruby passes, and clone-then-keep for every call whose answer runs Ruby.
+//! The `Data` classes, resolved once at load and pinned, and the rule every
+//! value read from Ruby passes. The exact-class check and clone-then-keep
+//! are `matryona_machines::ruby`'s.
 //!
 //! A value read back is either an instance of exactly this gem's class, whose
 //! fields are read straight from the struct (no reader runs), or a sibling
@@ -8,69 +9,35 @@
 //! `Data#initialize` can be bound directly, so it is a `TypeError`. Whatever
 //! was read is then rebuilt through the core constructor, which `Marshal.load`
 //! skipped.
-use std::cell::RefCell;
-use std::sync::OnceLock;
-
-use magnus::rb_sys::AsRawValue;
-use magnus::typed_data::Obj;
-use magnus::value::Opaque;
-use magnus::{Error, RClass, RModule, RStruct, Ruby, TypedData, Value, prelude::*};
+use magnus::{Error, RClass, RModule, Ruby, Value, prelude::*};
+use matryona_machines::ruby::{Class, Registry, exact_fields, instance_of};
 
 /// Every `Data` class the binding checks or builds.
 pub struct Classes {
-    pub token: Opaque<RClass>,
-    pub lease: Opaque<RClass>,
-    pub checkpoint: Opaque<RClass>,
-    pub cadence: Opaque<RClass>,
+    pub token: Class,
+    pub lease: Class,
+    pub checkpoint: Class,
+    pub cadence: Class,
 }
 
-static CLASSES: OnceLock<Classes> = OnceLock::new();
-
-fn setup_error(ruby: &Ruby) -> Error {
-    Error::new(
-        ruby.exception_runtime_error(),
-        "load lease_machines, not the extension alone",
-    )
-}
+static CLASSES: Registry<Classes> = Registry::new("lease_machines");
 
 /// Resolve the classes `lease_machines.rb` defined before requiring the
-/// extension. Each is registered with the GC, which keeps it alive and
-/// pinned: compaction must not move a class the binding holds by address.
+/// extension. Called once, from init; never by name again.
 pub fn resolve(ruby: &Ruby, module: RModule) -> Result<(), Error> {
-    let class = |name: &str| -> Result<Opaque<RClass>, Error> {
-        let class: RClass = module.const_get(name).map_err(|_| setup_error(ruby))?;
-        ruby.gc_register_mark_object(class);
-        Ok(Opaque::from(class))
-    };
+    let class = |name| Class::resolve(ruby, module, name);
     let classes = Classes {
         token: class("FencingToken")?,
         lease: class("Lease")?,
         checkpoint: class("Checkpoint")?,
         cadence: class("Cadence")?,
     };
-    CLASSES.set(classes).map_err(|_| setup_error(ruby))
+    CLASSES.set(ruby, classes).map(drop)
 }
 
 /// The classes resolved at load.
 pub fn classes(ruby: &Ruby) -> Result<&'static Classes, Error> {
-    CLASSES.get().ok_or_else(|| setup_error(ruby))
-}
-
-/// Whether `value` is an instance of exactly `class`, never a subclass, by
-/// pointer equality (no `==` the caller could redefine runs). A singleton
-/// class on the instance itself does not change what it is.
-pub fn is(ruby: &Ruby, value: Value, class: Opaque<RClass>) -> bool {
-    let (class, actual) = (ruby.get_inner(class), value.class());
-    if actual.as_raw() == class.as_raw() {
-        return true;
-    }
-    RStruct::from_value(value).is_some_and(|data| {
-        data.singleton_class()
-            .is_ok_and(|own| own.as_raw() == actual.as_raw())
-            && actual
-                .superclass()
-                .is_ok_and(|parent| parent.as_raw() == class.as_raw())
-    })
+    CLASSES.get(ruby)
 }
 
 fn type_error(ruby: &Ruby, message: String) -> Error {
@@ -91,20 +58,13 @@ pub enum Origin {
 pub fn fields<const N: usize>(
     ruby: &Ruby,
     value: Value,
-    class: Opaque<RClass>,
+    class: Class,
     readers: [&str; N],
     origin: Origin,
 ) -> Result<[Value; N], Error> {
-    let exact = is(ruby, value, class);
-    let class = ruby.get_inner(class);
-    let mut out = [ruby.qnil().as_value(); N];
-    if exact {
-        let data = RStruct::from_value(value)
-            .ok_or_else(|| type_error(ruby, format!("{class} is not a Data class")))?;
-        for (index, slot) in out.iter_mut().enumerate() {
-            *slot = data.aref(index)?;
-        }
-        return Ok(out);
+    let class: RClass = class.get(ruby);
+    if instance_of(value, class) {
+        return exact_fields::<N>(ruby, value, class, format!("expected a {class}"));
     }
     if value.is_kind_of(class) {
         return Err(type_error(
@@ -115,6 +75,7 @@ pub fn fields<const N: usize>(
     if origin == Origin::Own {
         return Err(type_error(ruby, format!("expected a {class}")));
     }
+    let mut out = [ruby.qnil().as_value(); N];
     for (slot, reader) in out.iter_mut().zip(readers) {
         if !value.respond_to(reader, false)? {
             return Err(type_error(
@@ -125,34 +86,4 @@ pub fn fields<const N: usize>(
         *slot = value.funcall(reader, ())?;
     }
     Ok(out)
-}
-
-/// Clone-then-keep: `decide` runs on a copy of the core and `build` turns its
-/// answer into Ruby, with no borrow held. The copy is stored only when the
-/// receiver is still unfrozen (`FrozenError`) and unchanged (`RuntimeError`:
-/// a re-entrant call changed it); otherwise nothing is applied.
-pub fn keep<T, C, A>(
-    ruby: &Ruby,
-    this: Obj<T>,
-    core: &RefCell<C>,
-    decide: impl FnOnce(&mut C) -> A,
-    build: impl FnOnce(A) -> Result<Value, Error>,
-) -> Result<Value, Error>
-where
-    T: TypedData,
-    C: Clone + PartialEq,
-{
-    this.check_frozen()?;
-    let before = core.borrow().clone();
-    let mut after = before.clone();
-    let answer = build(decide(&mut after))?;
-    this.check_frozen()?;
-    if *core.borrow() != before {
-        return Err(Error::new(
-            ruby.exception_runtime_error(),
-            "the receiver changed while the answer was being built; the call was not applied",
-        ));
-    }
-    *core.borrow_mut() = after;
-    Ok(answer)
 }
