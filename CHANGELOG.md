@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/seuros/lease_machines/compare/lease_machines/v0.4.0...lease_machines/v0.4.1) (2026-11-14)
+
+
+### Bug Fixes
+
+* **deps:** require matryona-machines &gt;= 0.3 and build exact-field messages lazily ([4b65322](https://github.com/seuros/lease_machines/commit/4b6532212f3356dbd70eb710724bac699da5c299))
+
 ## [0.4.0](https://github.com/seuros/lease_machines/compare/lease_machines/v0.3.0...lease_machines/v0.4.0) (2026-11-14)
 
 
