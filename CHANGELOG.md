@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.5.0](https://github.com/seuros/lease_machines/compare/lease_machines/v0.4.1...lease_machines/v0.5.0) (2026-11-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* read sibling tokens, leases and checkpoints with own_or_sibling
+
+### Features
+
+* read sibling tokens, leases and checkpoints with own_or_sibling ([7e7b690](https://github.com/seuros/lease_machines/commit/7e7b690dbb11db33976ff9c9380113f9fa931fd7))
+
 ## [0.4.1](https://github.com/seuros/lease_machines/compare/lease_machines/v0.4.0...lease_machines/v0.4.1) (2026-11-14)
 
 
