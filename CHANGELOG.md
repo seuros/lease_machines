@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.3.0](https://github.com/seuros/lease_machines/compare/lease_machines/v0.2.0...lease_machines/v0.3.0) (2026-11-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* validate every value through the core, seal values, exact-class reads, clone-then-keep decisions, restore the token niche
+
+### Features
+
+* validate every value through the core, seal values, exact-class reads, clone-then-keep decisions, restore the token niche ([690d5af](https://github.com/seuros/lease_machines/commit/690d5afaea91d7ce0cf3fdcf3a3720c8663d00ca))
+
 ## [0.2.0](https://github.com/seuros/lease_machines/compare/lease_machines/v0.1.6...lease_machines/v0.2.0) (2026-11-13)
 
 
