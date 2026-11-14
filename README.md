@@ -325,17 +325,19 @@ Stop the old authority before you start the one you restored. Two authorities fo
 
 A call that is honoured answers with a value. A call that is not honoured answers with one of the refusal symbols below, and only those, and changes nothing. Each refusal is the snake_case of one core `Refusal` variant; there is no catch-all symbol.
 
-| Call | Honoured | Refusals |
-| --- | --- | --- |
-| `authority.acquire(owner, now, ttl)` | `Lease` | `:clock_regressed`, `:invalid_ttl`, `:occupied`, `:held`, `:exhausted` |
-| `authority.reacquire(owner, now, ttl)` | `Lease` (new token every time) | `:clock_regressed`, `:invalid_ttl`, `:occupied`, `:exhausted` |
-| `authority.renew(owner, token, now, ttl)` | `Lease` | `:unknown`, `:clock_regressed`, `:no_lease`, `:wrong_owner`, `:stale_token`, `:expired`, `:invalid_ttl` |
-| `authority.release(owner, token, now)` | `Lease` (the one released) | `:unknown`, `:clock_regressed`, `:no_lease`, `:wrong_owner`, `:stale_token`, `:expired` |
-| `fence.accept(token)` | `:advanced`, `:current` (equals the mark; nothing changed) | `:unknown`, `:stale_token` |
-| `holder.refresh(now)` | `:started`, `:outstanding` | `:fenced` |
-| `holder.confirm(token, at)` | `:recorded`, `:duplicate` (already confirmed under `token`) | `:fenced`, `:unknown`, `:stale_token`, `:out_of_phase`, `:expired` |
-| `holder.expire` | `:recorded`, `:duplicate` (already expired) | `:fenced` |
-| `holder.reacquire(token, at)` | `:recorded`, `:duplicate` (already confirmed under `token`) | `:fenced`, `:unknown`, `:stale_token`, `:out_of_phase` |
+| Call | Honoured | Refusals | Records the clock |
+| --- | --- | --- | --- |
+| `authority.acquire(owner, now, ttl)` | `Lease` | `:clock_regressed`, `:invalid_ttl`, `:occupied`, `:held`, `:exhausted` | yes: the grant's expiry and the vacancy both depend on `now` |
+| `authority.reacquire(owner, now, ttl)` | `Lease` (new token every time) | `:clock_regressed`, `:invalid_ttl`, `:occupied`, `:exhausted` | yes, like `acquire` |
+| `authority.renew(owner, token, now, ttl)` | `Lease` | `:unknown`, `:clock_regressed`, `:no_lease`, `:wrong_owner`, `:stale_token`, `:expired`, `:invalid_ttl` | yes: honoured only while unexpired at `now`, a replay included |
+| `authority.release(owner, token, now)` | `Lease` (the one released) | `:unknown`, `:clock_regressed`, `:no_lease`, `:wrong_owner`, `:stale_token`, `:expired` | yes: honoured only while unexpired at `now` |
+| `fence.accept(token)` | `:advanced`, `:current` (equals the mark; nothing changed) | `:unknown`, `:stale_token` | no clock |
+| `holder.refresh(now)` | `:started`, `:outstanding` | `:fenced` | no: a holder keeps no watermark; `now` only picks `:unconfirmed` or `:at_risk` |
+| `holder.confirm(token, at)` | `:recorded`, `:duplicate` (already confirmed under `token`) | `:fenced`, `:unknown`, `:stale_token`, `:out_of_phase`, `:expired` | `:recorded` schedules the next renewal from `at`; `:duplicate` records nothing |
+| `holder.expire` | `:recorded`, `:duplicate` (already expired) | `:fenced` | no clock |
+| `holder.reacquire(token, at)` | `:recorded`, `:duplicate` (already confirmed under `token`) | `:fenced`, `:unknown`, `:stale_token`, `:out_of_phase` | `:recorded` schedules from `at`; `:duplicate` records nothing |
+
+The authority records `now` (under `:clamp`, the instant it evaluated at) on every honoured call, because every honoured answer it gives depends on that instant; a refusal records nothing.
 
 What each refusal means:
 
@@ -356,16 +358,20 @@ What each refusal means:
 
 `LeaseAuthority.new`, `LeaseAuthority.with_scope(scope)`, `with_clock_policy`, `clock_policy`, `scope`, `issued`, `checkpoint`, `Fence.new`, `Fence.with_scope(scope)`, `fence.scope`, `fence.highest`, `Holder.new`, `holder.state`, `holder.token`, `holder.cadence`, `holder.renewal_due?`, `holder.at_risk?`, `holder.warning_deadline` (`nil` once fenced) and `holder.fence` never refuse. `LeaseAuthority.restored`, `Fence.resumed`, `Checkpoint.from_parts`, `Cadence.new` and `FencingToken.from_raw` answer a value or raise `RangeError` for input the core's constructor answers `None` to.
 
+A value is valid or does not exist. `FencingToken.new`, `Lease.new`, `Checkpoint.new` and `Cadence.new` are checked by the core whoever calls them, so a value built by hand is held to the rule one the gem answered is: `Lease.new('x', 5, -1)` raises `TypeError`, `Lease.new(1, token, -1)` raises `RangeError`. A `Lease` built with a sibling gem's token, or a `Checkpoint` with a sibling's lease, keeps this gem's own `FencingToken` and `Lease`, so it is `==` to the one the authority answers.
+
 ## The Rules of the Tender
 
 - **Owners are Integers** in `0..2**64-1`. Floats raise `TypeError`, out-of-range raises `RangeError`.
 - **Tokens are `FencingToken` values**, never bare Integers: a `raw` Integer whose top 16 bits are the issuing authority's scope, above a sequence number counted from 1. `FencingToken.from_raw` raises `RangeError` for a sequence number of zero. A token you rebuilt proves nothing by itself.
-- **A sibling's value fits as it is.** Wherever a method takes a token, a lease or a checkpoint, it reads it by its readers (`raw`; `owner`, `token`, `expires_at`; `scope`, `issued`, `lease`, `observed`), not by its class. A token that came back from `ElectionMachines` or `HandoffMachines` goes straight into `fence.accept`, `authority.renew`, `authority.release` or a `Holder`, and its `raw` is checked exactly as `FencingToken.from_raw` checks it. Anything without the reader, a bare Integer included, raises `TypeError`. What a method answers is always this gem's own `FencingToken`, `Lease` or `Checkpoint`.
+- **A sibling's value fits as it is.** Wherever a method takes a token, a lease or a checkpoint, it reads a sibling gem's value by its readers (`raw`; `owner`, `token`, `expires_at`; `scope`, `issued`, `lease`, `observed`). A token that came back from `ElectionMachines` or `HandoffMachines` goes straight into `fence.accept`, `authority.renew`, `authority.release` or a `Holder`, and its `raw` is checked exactly as `FencingToken.from_raw` checks it. Anything without the reader, a bare Integer included, raises `TypeError`. What a method answers is always this gem's own `FencingToken`, `Lease` or `Checkpoint`.
+- **The binding is the authority on values.** `FencingToken`, `Lease`, `Checkpoint` and `Cadence` are sealed (no `allocate`, no subclass), but Ruby binds a subclass constant before `inherited` raises, `Data#initialize` can be bound directly and `Marshal.load` skips `initialize`. So the native side reads one of this gem's values only when it is exactly that class (a subclass raises `TypeError`, whatever it holds) and checks every field again as the core's constructor does: a forged value raises `TypeError` or `RangeError` and never reaches the authority, a fence or a holder.
 - **Time is Integer nanoseconds.** `now`, `ttl`, `expires_at`, `observed`, `confirmed_at`, `at`, a `Cadence`. A Float or any other non-Integer raises `TypeError`; a negative value, or one past the core's range (`2**64` seconds), raises `RangeError`. `expires_at` is `now + ttl` exactly, so it can read back larger than `2**64-1`.
 - **Values mirror the core.** `Lease`, `Checkpoint`, `Cadence` and `FencingToken` are `Data` with the core's fields in the core's order. Enums without fields are Symbols: `:reject` and `:clamp`, the five holder states, every answer of `accept`, `refresh`, `confirm`, `expire` and `reacquire`. No argument has a default the core lacks, and nothing is a keyword.
 - **Scopes.** A token only means something to the authority that issued it. Sequence numbers count from 1, so two authorities hand out the same tokens, and a fence could not tell them apart. Give each authority its own scope: `LeaseAuthority.with_scope(scope)`, any Integer in `0..65_535` (a non-Integer raises `TypeError`, anything outside the range raises `RangeError`). `LeaseAuthority.new` is scope zero, where tokens read 1, 2, 3. `authority.scope`, `fence.scope` and `token.scope` read it back. A token of another scope is `:unknown` to the authority, to a fence and to a holder, whatever its number, and changes nothing. Nobody can pick a scope for you, and two authorities left in the same scope still mix up each other's tokens.
 - **Tokens of two scopes have no order.** `FencingToken` has no `<` and no `<=>`. `order` answers `-1`, `0`, `1`, or `nil` across scopes; `newer_than?` answers `false` across scopes.
-- **Refusals don't raise.** Every call that can refuse answers a value when honoured and one of `LeaseMachines::REFUSALS` otherwise. Only malformed input raises.
+- **The binding never loses work.** Every argument is read and checked before the authority is asked anything. Building the answer runs Ruby (`Lease.new`, `FencingToken.new`), so the authority decides on a copy, the `Lease` is built, and the copy is kept only if the authority is still unfrozen (`FrozenError` otherwise) and unchanged (`RuntimeError` otherwise: something re-entered it while the answer was built). A call that raised changed nothing.
+- **Refusals don't raise.** Every call that can refuse answers a value when honoured and one of `LeaseMachines::REFUSALS` otherwise. Only malformed input raises: `TypeError` for the wrong type, `RangeError` for a value the core does not accept (a clock policy other than `:reject` or `:clamp` included). Nothing raises `ArgumentError` except Ruby itself, for the wrong number of arguments.
 - **A refusal changes nothing.** Not the lease, not the token count, not the clock. That includes `:expired` and `:clock_regressed`: each is an answer about the `now` supplied, not a recorded fact, and the same call at another instant may be honoured.
 - **A repeat is not a refusal, when it can be proved.** `:duplicate` and `:current` mean "that was already true, nothing changed". Treat them as success. `acquire` and `release` have no such answer, for the reasons given where they are described.
 - **Frozen means frozen.** `freeze` an authority, a fence or a holder and every mutating call raises `FrozenError`. Reads still work.

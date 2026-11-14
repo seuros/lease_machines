@@ -3,17 +3,18 @@ use std::{cell::RefCell, cmp::Ordering};
 
 use magnus::{Error, Ruby, Symbol, prelude::*, typed_data::Obj};
 
-use crate::{Scope, Token, names};
+use crate::values::TokenValue;
+use crate::{Scope, names};
 
 type Core = lease_machines::Fence;
 
-/// `FencingToken#scope`; converting the token is what validates it.
-pub const fn token_scope(token: Token) -> u16 {
+/// `FencingToken#scope`; reading the token is what validates it.
+pub const fn token_scope(token: TokenValue) -> u16 {
     token.0.scope()
 }
 
 /// `FencingToken#order`: -1, 0, 1, or `nil` across scopes.
-pub fn token_order(token: Token, other: Token) -> Option<i8> {
+pub fn token_order(token: TokenValue, other: TokenValue) -> Option<i8> {
     token.0.order(other.0).map(|order| match order {
         Ordering::Less => -1,
         Ordering::Equal => 0,
@@ -22,7 +23,7 @@ pub fn token_order(token: Token, other: Token) -> Option<i8> {
 }
 
 /// `FencingToken#newer_than?`.
-pub const fn token_newer(token: Token, other: Token) -> bool {
+pub const fn token_newer(token: TokenValue, other: TokenValue) -> bool {
     token.0.is_newer_than(other.0)
 }
 
@@ -34,7 +35,7 @@ impl Fence {
         Self(RefCell::new(Core::with_scope(scope.0)))
     }
 
-    pub fn resumed(ruby: &Ruby, scope: Scope, highest: Option<Token>) -> Result<Self, Error> {
+    pub fn resumed(ruby: &Ruby, scope: Scope, highest: Option<TokenValue>) -> Result<Self, Error> {
         Core::resumed(scope.0, highest.map(|token| token.0))
             .map(|core| Self(RefCell::new(core)))
             .ok_or_else(|| {
@@ -56,7 +57,7 @@ impl Fence {
             .map(lease_machines::FencingToken::raw)
     }
 
-    pub fn accept(ruby: &Ruby, this: Obj<Self>, token: Token) -> Result<Symbol, Error> {
+    pub fn accept(ruby: &Ruby, this: Obj<Self>, token: TokenValue) -> Result<Symbol, Error> {
         this.check_frozen()?;
         let outcome = this.0.borrow_mut().accept(token.0);
         Ok(names::accepted(ruby, outcome))

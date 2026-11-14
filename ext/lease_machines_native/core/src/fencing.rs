@@ -19,6 +19,10 @@ use crate::Refusal;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FencingToken(NonZeroU64);
 
+// The niche keeps an optional token (a fence's mark, a checkpoint's lease)
+// the size of a bare one.
+const _: () = assert!(size_of::<Option<FencingToken>>() == size_of::<u64>());
+
 impl FencingToken {
     /// Rebuild a token that crossed a wire or came out of storage.
     ///
@@ -28,13 +32,22 @@ impl FencingToken {
     /// another scope.
     #[must_use]
     pub const fn from_raw(raw: u64) -> Option<Self> {
-        if sequence_of(raw) == 0 {
-            return None;
-        }
+        // A zero raw has sequence zero too, so both arms are real answers.
         match NonZeroU64::new(raw) {
-            Some(raw) => Some(Self(raw)),
-            None => None,
+            Some(raw) if sequence_of(raw.get()) != 0 => Some(Self(raw)),
+            Some(_) | None => None,
         }
+    }
+
+    /// A token the authority's issuer just issued. The issuer counts
+    /// sequences from one, so `raw` is never zero and the saturating
+    /// arithmetic is the identity on it: no arm for a zero to fall into.
+    pub(crate) const fn issued(raw: u64) -> Self {
+        debug_assert!(
+            sequence_of(raw) != 0,
+            "the issuer counts sequences from one"
+        );
+        Self(NonZeroU64::MIN.saturating_add(raw.saturating_sub(1)))
     }
 
     /// The whole token for storage or transport: scope in the top 16 bits,

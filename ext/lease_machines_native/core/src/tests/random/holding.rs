@@ -4,7 +4,7 @@ use std::format;
 use super::Run;
 use crate::tests::at;
 use crate::tests::model::Tracker;
-use crate::{Cadence, Holder, HolderState, OwnerId, Recording, Refusal};
+use crate::{Cadence, Holder, HolderState, OwnerId, Recording};
 
 impl Run {
     /// A report reaches owner zero's holder, in any state, with any token.
@@ -58,7 +58,7 @@ impl Run {
         let owner = OwnerId::new(0);
         let cadence = Cadence::new(at(8), at(2), at(3)).unwrap();
         let Some((holder, _)) = self.holder else {
-            if let Ok(lease) = self.grant(owner, false) {
+            if let Some(lease) = self.grant(owner, false) {
                 let pair = (
                     Holder::new(lease.token(), self.now, cadence),
                     Tracker::new(lease.token(), self.now, cadence),
@@ -76,31 +76,31 @@ impl Run {
         }
         // A holder told its grant expired does not ask to renew it.
         let renewed = if holder.state() == HolderState::Expired {
-            Err(Refusal::Expired)
+            None
         } else {
             self.renew(owner, holder.token())
         };
-        let fresh = if renewed.is_err() {
-            self.grant(owner, true).ok()
+        let fresh = if renewed.is_none() {
+            self.grant(owner, true)
         } else {
             None
         };
         let now = self.now;
         let (holder, tracker) = self.holder.as_mut().unwrap();
         assert_eq!(holder.refresh(now), tracker.refresh(now));
-        if let Ok(lease) = renewed {
-            assert_eq!(holder.confirm(lease.token(), now), Ok(Recording::Recorded));
-            let _ = tracker.confirm(lease.token(), now);
+        if let Some(lease) = renewed {
+            let answer = holder.confirm(lease.token(), now);
+            assert_eq!(answer, tracker.confirm(lease.token(), now));
+            assert_eq!(answer, Ok(Recording::Recorded));
         } else {
-            assert!(holder.expire().is_ok());
-            let _ = tracker.expire();
+            let answer = holder.expire();
+            assert_eq!(answer, tracker.expire());
+            assert!(answer.is_ok());
             if let Some(lease) = fresh {
                 // A fresh grant is always newer than anything the holder saw.
-                assert_eq!(
-                    holder.reacquire(lease.token(), now),
-                    Ok(Recording::Recorded)
-                );
-                let _ = tracker.reacquire(lease.token(), now);
+                let answer = holder.reacquire(lease.token(), now);
+                assert_eq!(answer, tracker.reacquire(lease.token(), now));
+                assert_eq!(answer, Ok(Recording::Recorded));
             }
         }
     }

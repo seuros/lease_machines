@@ -13,8 +13,8 @@ use crate::Lease;
 /// see the persistence contract in the crate documentation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Checkpoint {
-    scope: u16,
-    issued: u64,
+    /// The token sequence as committed: its scope and how many were issued.
+    tokens: Issuer,
     lease: Option<Lease>,
     observed: Duration,
 }
@@ -37,17 +37,16 @@ impl Checkpoint {
         lease: Option<Lease>,
         observed: Duration,
     ) -> Option<Self> {
-        if Issuer::resumed(scope, issued).is_none() {
+        let Some(tokens) = Issuer::resumed(scope, issued) else {
             return None;
-        }
+        };
         if let Some(lease) = lease
             && (issued == 0 || lease.token().raw() != scoped(scope, issued))
         {
             return None;
         }
         Some(Self {
-            scope,
-            issued,
+            tokens,
             lease,
             observed,
         })
@@ -55,35 +54,33 @@ impl Checkpoint {
 
     /// State taken from a live authority, whose invariants already hold.
     pub(crate) const fn committed(
-        scope: u16,
-        issued: u64,
+        tokens: Issuer,
         lease: Option<Lease>,
         observed: Duration,
     ) -> Self {
         Self {
-            scope,
-            issued,
+            tokens,
             lease,
             observed,
         }
     }
 
-    /// Spend the checkpoint: scope, issued, lease, observed.
-    pub(crate) const fn into_parts(self) -> (u16, u64, Option<Lease>, Duration) {
-        (self.scope, self.issued, self.lease, self.observed)
+    /// Spend the checkpoint: the token sequence, lease, observed.
+    pub(crate) const fn into_parts(self) -> (Issuer, Option<Lease>, Duration) {
+        (self.tokens, self.lease, self.observed)
     }
 
     /// The scope of the authority this state belongs to.
     #[must_use]
     pub const fn scope(&self) -> u16 {
-        self.scope
+        self.tokens.scope()
     }
 
     /// How many tokens this history has issued, releases included; the next
     /// token is sequence `issued + 1`.
     #[must_use]
     pub const fn issued(&self) -> u64 {
-        self.issued
+        self.tokens.issued()
     }
 
     /// Last grant; it may already be expired at the latest observation.

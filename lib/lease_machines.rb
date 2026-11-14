@@ -1,8 +1,6 @@
 # frozen_string_literal: true
 
 require_relative 'lease_machines/version'
-# Native is required: no algorithm fallback.
-require 'lease_machines_native/lease_machines_native'
 
 # Every value mirrors the core type of the same name, field for field, and
 # every method takes the core's arguments in the core's order. Every instant
@@ -14,11 +12,13 @@ require 'lease_machines_native/lease_machines_native'
 # shape (`ElectionMachines::FencingToken`, `HandoffMachines::FencingToken`)
 # fits as it is and is validated like this gem's own. Every value a method
 # answers is this gem's own class.
+#
+# The native side is the authority on every value it reads: one of this gem's
+# classes must be exactly that class (a subclass is a TypeError, whatever it
+# holds), and every field is validated again through the core constructor, so
+# a value forged past `initialize` (`Marshal.load`, a bound
+# `Data#initialize`) raises TypeError or RangeError and never reaches a core.
 module LeaseMachines
-  class << self
-    private :native_token_scope, :native_token_order, :native_token_newer, :native_cadence, :native_checkpoint
-  end
-
   # A fencing token: the issuing authority's scope in the top 16 bits of `raw`
   # above a sequence number counted from 1. Plain data, so it survives a trip
   # over the wire as `raw` and comes back with `from_raw`. A token built here
@@ -33,23 +33,31 @@ module LeaseMachines
     def self.from_raw(raw) = new(raw)
 
     def initialize(raw:)
-      LeaseMachines.__send__(:native_token_scope, raw)
+      LeaseMachines.__send__(:native_raw, raw)
       super
     end
 
     # The scope of the authority that issued this token.
-    def scope = LeaseMachines.__send__(:native_token_scope, raw)
+    def scope = LeaseMachines.__send__(:native_token_scope, self)
 
     # -1, 0 or 1 against a token of the same scope; nil across scopes.
-    def order(other) = LeaseMachines.__send__(:native_token_order, raw, Rows.raw(other))
+    def order(other) = LeaseMachines.__send__(:native_token_order, self, other)
 
     # Whether this token is of `other`'s scope and strictly newer. False across
     # scopes, so its negation does not mean "older or equal".
-    def newer_than?(other) = LeaseMachines.__send__(:native_token_newer, raw, Rows.raw(other))
+    def newer_than?(other) = LeaseMachines.__send__(:native_token_newer, self, other)
   end
 
-  # One grant: who holds the resource, under which token, until when.
-  Lease = Data.define(:owner, :token, :expires_at)
+  # One grant: who holds the resource, under which token, until when. Built by
+  # hand it is held to the rule a granted one is: an Integer owner in
+  # 0..2**64-1, a token read by its `raw` reader and kept as this gem's
+  # FencingToken, Integer nanoseconds. TypeError for the wrong type,
+  # RangeError for a value outside that.
+  Lease = Data.define(:owner, :token, :expires_at) do
+    def initialize(owner:, token:, expires_at:)
+      super(owner:, token: LeaseMachines.__send__(:native_lease, owner, token, expires_at), expires_at:)
+    end
+  end
 
   # Committed authority state, the core's `Checkpoint`: persist the four
   # fields before exposing a decision, rebuild with `from_parts`. RangeError
@@ -63,9 +71,8 @@ module LeaseMachines
     def self.from_parts(scope, issued, lease, observed) = new(scope, issued, lease, observed)
 
     def initialize(scope:, issued:, lease:, observed:)
-      held = lease && Rows.lease(lease)
-      LeaseMachines.__send__(:native_checkpoint, [scope, issued, held, observed])
-      super(scope:, issued:, lease: held && Rows.to_lease(held), observed:)
+      held = LeaseMachines.__send__(:native_checkpoint, scope, issued, lease, observed)
+      super(scope:, issued:, lease: held, observed:)
     end
   end
 
@@ -73,47 +80,34 @@ module LeaseMachines
   # `ttl` is positive, `renew_after < ttl` and `warn_before <= ttl`.
   Cadence = Data.define(:ttl, :renew_after, :warn_before) do
     def initialize(ttl:, renew_after:, warn_before:)
-      LeaseMachines.__send__(:native_cadence, [ttl, renew_after, warn_before])
+      LeaseMachines.__send__(:native_cadence, ttl, renew_after, warn_before)
       super
     end
   end
 
-  # Values to and from the rows the native extension trades in. Tokens, leases
-  # and checkpoints are read by their readers, whichever gem defined them; the
-  # native side then validates each Integer as it does this gem's own.
-  module Rows
-    module_function
-
-    def read(value, reader, what)
-      raise TypeError, "expected #{what} (no ##{reader})" unless value.respond_to?(reader)
-
-      value.public_send(reader)
-    end
-
-    # A bare Integer is not a token: it has no `raw`.
-    def raw(token) = read(token, :raw, 'a fencing token')
-
-    def lease(lease)
-      what = 'a lease'
-      [read(lease, :owner, what), raw(read(lease, :token, what)), read(lease, :expires_at, what)]
-    end
-
-    def to_lease(row) = Lease.new(row[0], FencingToken.new(row[1]), row[2])
-
-    def checkpoint(checkpoint)
-      what = 'a checkpoint'
-      held = read(checkpoint, :lease, what)
-      [read(checkpoint, :scope, what), read(checkpoint, :issued, what), held && lease(held),
-       read(checkpoint, :observed, what)]
-    end
-
-    def cadence(cadence)
-      raise TypeError, 'expected a LeaseMachines::Cadence' unless cadence.is_a?(Cadence)
-
-      [cadence.ttl, cadence.renew_after, cadence.warn_before]
-    end
+  # Sealed: no subclass can skip the checks above by overriding `initialize`,
+  # and no bare `allocate` builds a value that never ran them. Ruby still
+  # binds a subclass constant before `inherited` raises; the native side
+  # refuses its instances.
+  [FencingToken, Lease, Checkpoint, Cadence].each do |value|
+    value.singleton_class.undef_method(:allocate)
+    value.define_singleton_method(:inherited) { |_| raise TypeError, "#{value} cannot be subclassed" }
   end
-  private_constant :Rows
+end
+
+# Native is required: no algorithm fallback. It resolves the classes above
+# once, here.
+require 'lease_machines_native/lease_machines_native'
+
+module LeaseMachines
+  class << self
+    private :native_raw, :native_token_scope, :native_token_order, :native_token_newer, :native_lease,
+            :native_cadence, :native_checkpoint
+  end
+
+  # A lease as the native side answers it, `[owner, raw, expires_at]`.
+  def self.lease_of(row) = Lease.new(row[0], FencingToken.new(row[1]), row[2])
+  private_class_method :lease_of
 
   # The core's `LeaseAuthority`: one resource, one token scope. Every decision
   # answers a Lease when honoured and a refusal Symbol otherwise.
@@ -129,7 +123,7 @@ module LeaseMachines
       # The newest committed checkpoint of `scope`, with the clock policy
       # stated again. RangeError when the checkpoint is of another scope.
       def restored(scope, checkpoint, clock_policy)
-        native_restored(scope, Rows.checkpoint(checkpoint), clock_policy)
+        native_restored(scope, checkpoint, clock_policy)
       end
 
       private :native_with_scope, :native_restored
@@ -144,20 +138,20 @@ module LeaseMachines
 
     def checkpoint
       scope, issued, held, observed = native_checkpoint
-      Checkpoint.new(scope, issued, held && Rows.to_lease(held), observed)
+      Checkpoint.new(scope, issued, held && LeaseMachines.__send__(:lease_of, held), observed)
     end
 
-    def acquire(owner, now, ttl) = decided(native_acquire(owner, now, ttl))
+    # Every decision decides on a copy of the authority, builds the Lease
+    # (its `new` runs), then keeps the copy only if this authority is still
+    # unfrozen (FrozenError) and unchanged (RuntimeError: a re-entrant call
+    # changed it). Either way, a raise means nothing was applied.
+    def acquire(owner, now, ttl) = native_acquire(owner, now, ttl)
 
-    def reacquire(owner, now, ttl) = decided(native_reacquire(owner, now, ttl))
+    def reacquire(owner, now, ttl) = native_reacquire(owner, now, ttl)
 
-    def renew(owner, token, now, ttl) = decided(native_renew(owner, Rows.raw(token), now, ttl))
+    def renew(owner, token, now, ttl) = native_renew(owner, token, now, ttl)
 
-    def release(owner, token, now) = decided(native_release(owner, Rows.raw(token), now))
-
-    private
-
-    def decided(answer) = answer.is_a?(Symbol) ? answer : Rows.to_lease(answer)
+    def release(owner, token, now) = native_release(owner, token, now)
   end
 
   # The core's `Fence`: the protected resource's side. It is built for a scope
@@ -172,7 +166,7 @@ module LeaseMachines
 
       # The newest committed high-water mark of `scope` (nil for none).
       # RangeError when `highest` is a token of another scope.
-      def resumed(scope, highest) = native_resumed(scope, highest && Rows.raw(highest))
+      def resumed(scope, highest) = native_resumed(scope, highest)
 
       private :native_with_scope, :native_resumed
     end
@@ -182,13 +176,13 @@ module LeaseMachines
       raw && FencingToken.new(raw)
     end
 
-    def accept(token) = native_accept(Rows.raw(token))
+    def accept(token) = native_accept(token)
   end
 
   # The core's `Holder`: the renewal tracker on the side that holds the grant.
   class Holder
     class << self
-      def new(token, confirmed_at, cadence) = native_new(Rows.raw(token), confirmed_at, Rows.cadence(cadence))
+      def new(token, confirmed_at, cadence) = native_new(token, confirmed_at, cadence)
 
       private :native_new
     end
@@ -197,8 +191,8 @@ module LeaseMachines
 
     def cadence = Cadence.new(*native_cadence)
 
-    def confirm(token, at) = native_confirm(Rows.raw(token), at)
+    def confirm(token, at) = native_confirm(token, at)
 
-    def reacquire(token, at) = native_reacquire(Rows.raw(token), at)
+    def reacquire(token, at) = native_reacquire(token, at)
   end
 end

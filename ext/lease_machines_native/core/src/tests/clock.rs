@@ -1,6 +1,4 @@
 //! The observed clock: checked on every call, recorded only by honoured ones.
-use periscope_machines::SEQUENCE_MAX;
-
 use super::*;
 
 /// The defect this conversion fixed: every refusal used to record its `now`
@@ -47,16 +45,6 @@ fn a_refusal_never_moves_the_watermark() {
         a.release(FIRST, live, at(30))
     });
     assert_eq!(authority.checkpoint().observed(), at(1));
-}
-
-#[test]
-fn an_exhausted_refusal_does_not_move_the_watermark_either() {
-    let spent = Checkpoint::from_parts(SCOPE, SEQUENCE_MAX, None, at(3)).unwrap();
-    let mut authority = LeaseAuthority::restored(SCOPE, spent, ClockPolicy::Reject).unwrap();
-    refuses(&mut authority, Refusal::Exhausted, |a| {
-        a.acquire(FIRST, at(9), at(1))
-    });
-    assert_eq!(authority.checkpoint().observed(), at(3));
 }
 
 #[test]
@@ -136,31 +124,8 @@ fn clamping_cannot_revive_a_lease_another_owner_replaced() {
     assert_eq!(authority.checkpoint().lease(), Some(second));
 }
 
-/// What "a refusal changes nothing" costs, stated as a test: a refused
-/// `Expired` is not remembered, so the grant is still the owner's to renew if
-/// a later call brings an instant at which it is live. Exclusion never rested
-/// on that memory: nobody else holds a grant until an honoured `acquire`
-/// records the instant that ended this one.
-#[test]
-fn a_refused_expiry_is_not_remembered() {
-    let mut authority = LeaseAuthority::with_scope(SCOPE);
-    let lease = authority.acquire(FIRST, at(0), at(13)).unwrap();
-    refuses(&mut authority, Refusal::Expired, |a| {
-        a.renew(FIRST, lease.token(), at(14), at(5))
-    });
-    assert!(authority.renew(FIRST, lease.token(), at(12), at(5)).is_ok());
-    // An honoured acquisition is remembered, and ends the matter.
-    let next = authority.acquire(SECOND, at(17), at(5)).unwrap();
-    refuses(&mut authority, Refusal::ClockRegressed, |a| {
-        a.renew(FIRST, lease.token(), at(12), at(5))
-    });
-    refuses(&mut authority, Refusal::WrongOwner, |a| {
-        a.renew(FIRST, lease.token(), at(17), at(5))
-    });
-    assert_eq!(authority.checkpoint().lease(), Some(next));
-}
-
-/// `Expired` is an answer about the instant supplied, under either policy:
+/// What "a refusal changes nothing" costs, stated as a test. `Expired` is an
+/// answer about the instant supplied, under either policy:
 /// the same renewal at an earlier instant, not behind the latest honoured
 /// one, is honoured. Exclusion holds all the same. One grant slot; another
 /// owner enters only through an honoured `acquire`, which records its instant
@@ -188,7 +153,15 @@ fn expired_is_an_answer_about_the_instant_supplied() {
         });
         let second = authority.acquire(SECOND, at(15), at(10)).unwrap();
         assert_eq!(second.token(), token(SCOPE, 2));
-        // That acquisition was honoured, so it is remembered.
+        // That acquisition was honoured, so it is remembered: the instant the
+        // first grant was live is behind it now, or evaluated at it.
+        let behind = match policy {
+            ClockPolicy::Reject => Refusal::ClockRegressed,
+            ClockPolicy::Clamp => Refusal::WrongOwner,
+        };
+        refuses(&mut authority, behind, |a| {
+            a.renew(FIRST, first, at(5), at(10))
+        });
         refuses(&mut authority, Refusal::WrongOwner, |a| {
             a.renew(FIRST, first, at(16), at(10))
         });

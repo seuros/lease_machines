@@ -82,20 +82,16 @@ impl LeaseAuthority {
     /// The caller must prevent simultaneous serving by the previous authority.
     #[must_use]
     pub const fn restored(scope: u16, checkpoint: Checkpoint, clock: ClockPolicy) -> Option<Self> {
-        let (saved, issued, lease, observed) = checkpoint.into_parts();
-        if saved != scope {
+        let (tokens, lease, observed) = checkpoint.into_parts();
+        if tokens.scope() != scope {
             return None;
         }
-        match Issuer::resumed(scope, issued) {
-            Some(tokens) => Some(Self {
-                tokens,
-                lease,
-                observed,
-                clock,
-            }),
-            // Unreachable: a checkpoint never holds a count past the last sequence.
-            None => None,
-        }
+        Some(Self {
+            tokens,
+            lease,
+            observed,
+            clock,
+        })
     }
 
     /// Choose how earlier-than-observed clocks are handled; `Reject` by default.
@@ -127,7 +123,7 @@ impl LeaseAuthority {
     /// Persist it before exposing the decision that produced it.
     #[must_use]
     pub const fn checkpoint(&self) -> Checkpoint {
-        Checkpoint::committed(self.scope(), self.issued(), self.lease, self.observed)
+        Checkpoint::committed(self.tokens, self.lease, self.observed)
     }
 
     /// Acquire an unoccupied or expired resource with a new, strictly greater
@@ -184,10 +180,9 @@ impl LeaseAuthority {
         // Issuing is the last thing that can refuse, so no token is consumed
         // by a call refused for another reason.
         let token = match self.tokens.issue() {
-            Ok(raw) => FencingToken::from_raw(raw),
-            Err(periscope_machines::Refusal::Exhausted) => None,
-        }
-        .ok_or(Refusal::Exhausted)?;
+            Ok(raw) => FencingToken::issued(raw),
+            Err(periscope_machines::Refusal::Exhausted) => return Err(Refusal::Exhausted),
+        };
         let lease = Lease::new(owner, token, expires_at);
         self.lease = Some(lease);
         self.observed = now;

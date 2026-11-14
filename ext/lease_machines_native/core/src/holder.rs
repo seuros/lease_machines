@@ -64,6 +64,15 @@ pub enum HolderState {
     Fenced,
 }
 
+/// The states a report can still be recorded in: every one but `Fenced`.
+#[derive(Clone, Copy)]
+enum Standing {
+    Confirmed,
+    /// A renewal is in flight: `Unconfirmed` or `AtRisk`.
+    Renewing,
+    Expired,
+}
+
 /// Honoured outcome of [`Holder::refresh`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refreshing {
@@ -215,20 +224,15 @@ impl Holder {
         token: FencingToken,
         at: Duration,
     ) -> Result<Recording, Refusal> {
-        let same = match self.rank(token) {
-            Ok(same) => same,
-            Err(refusal) => return Err(refusal),
-        };
-        match self.state {
-            HolderState::Unconfirmed | HolderState::AtRisk => {
+        match self.rank(token) {
+            Err(refusal) => Err(refusal),
+            Ok((Standing::Renewing, _)) => {
                 self.accept(token, at);
                 Ok(Recording::Recorded)
             }
-            HolderState::Confirmed if same => Ok(Recording::Duplicate),
-            HolderState::Confirmed => Err(Refusal::OutOfPhase),
-            HolderState::Expired => Err(Refusal::Expired),
-            // Unreachable: `rank` refuses a fenced holder.
-            HolderState::Fenced => Err(Refusal::Fenced),
+            Ok((Standing::Confirmed, true)) => Ok(Recording::Duplicate),
+            Ok((Standing::Confirmed, false)) => Err(Refusal::OutOfPhase),
+            Ok((Standing::Expired, _)) => Err(Refusal::Expired),
         }
     }
 
@@ -261,22 +265,15 @@ impl Holder {
         token: FencingToken,
         at: Duration,
     ) -> Result<Recording, Refusal> {
-        let same = match self.rank(token) {
-            Ok(same) => same,
-            Err(refusal) => return Err(refusal),
-        };
-        match self.state {
-            HolderState::Expired if same => Err(Refusal::StaleToken),
-            HolderState::Expired => {
+        match self.rank(token) {
+            Err(refusal) => Err(refusal),
+            Ok((Standing::Expired, true)) => Err(Refusal::StaleToken),
+            Ok((Standing::Expired, false)) => {
                 self.accept(token, at);
                 Ok(Recording::Recorded)
             }
-            HolderState::Confirmed if same => Ok(Recording::Duplicate),
-            HolderState::Confirmed | HolderState::Unconfirmed | HolderState::AtRisk => {
-                Err(Refusal::OutOfPhase)
-            }
-            // Unreachable: `rank` refuses a fenced holder.
-            HolderState::Fenced => Err(Refusal::Fenced),
+            Ok((Standing::Confirmed, true)) => Ok(Recording::Duplicate),
+            Ok((Standing::Confirmed, false) | (Standing::Renewing, _)) => Err(Refusal::OutOfPhase),
         }
     }
 
@@ -286,12 +283,16 @@ impl Holder {
         self.state = HolderState::Fenced;
     }
 
-    /// Whether `token` is the one held (`true`) or a newer one of its scope
-    /// (`false`); the refusal every token-carrying report shares otherwise.
-    const fn rank(&self, token: FencingToken) -> Result<bool, Refusal> {
-        if matches!(self.state, HolderState::Fenced) {
-            return Err(Refusal::Fenced);
-        }
+    /// Where the holder stands, and whether `token` is the one held (`true`)
+    /// or a newer one of its scope (`false`); the refusal every
+    /// token-carrying report shares otherwise.
+    const fn rank(&self, token: FencingToken) -> Result<(Standing, bool), Refusal> {
+        let standing = match self.state {
+            HolderState::Fenced => return Err(Refusal::Fenced),
+            HolderState::Confirmed => Standing::Confirmed,
+            HolderState::Unconfirmed | HolderState::AtRisk => Standing::Renewing,
+            HolderState::Expired => Standing::Expired,
+        };
         if token.scope() != self.token.scope() {
             return Err(Refusal::Unknown);
         }
@@ -299,7 +300,7 @@ impl Holder {
         if token.raw() < self.token.raw() {
             return Err(Refusal::StaleToken);
         }
-        Ok(token.raw() == self.token.raw())
+        Ok((standing, token.raw() == self.token.raw()))
     }
 
     const fn accept(&mut self, token: FencingToken, at: Duration) {

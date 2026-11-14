@@ -1,14 +1,15 @@
 //! Private native entry point.
 use magnus::{Error, Ruby, function, method, prelude::*};
 
-use crate::authority::{self, LeaseAuthority};
+use crate::authority::LeaseAuthority;
 use crate::fence::{self, Fence};
-use crate::holder::{self, Holder};
-use crate::names;
+use crate::holder::Holder;
+use crate::{classes, names, values};
 
 #[magnus::init]
 fn init(ruby: &Ruby) -> Result<(), Error> {
     let module = ruby.define_module("LeaseMachines")?;
+    classes::resolve(ruby, module)?;
     let symbols = |names: &[&str]| {
         let list = ruby.ary_from_iter(names.iter().map(|name| ruby.to_symbol(*name)));
         list.freeze();
@@ -20,8 +21,11 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     module.define_singleton_method("native_token_scope", function!(fence::token_scope, 1))?;
     module.define_singleton_method("native_token_order", function!(fence::token_order, 2))?;
     module.define_singleton_method("native_token_newer", function!(fence::token_newer, 2))?;
-    module.define_singleton_method("native_cadence", function!(holder::validate, 1))?;
-    module.define_singleton_method("native_checkpoint", function!(authority::validate, 1))?;
+    module.define_singleton_method("native_raw", function!(crate::validate_raw, 1))?;
+    module.define_singleton_method("native_lease", function!(values::validate_lease, 3))?;
+    module.define_singleton_method("native_cadence", function!(values::validate_cadence, 3))?;
+    let checkpoint = function!(values::validate_checkpoint, 4);
+    module.define_singleton_method("native_checkpoint", checkpoint)?;
 
     let class = module.define_class("LeaseAuthority", ruby.class_object())?;
     class.undef_default_alloc_func();

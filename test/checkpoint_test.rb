@@ -59,7 +59,7 @@ class CheckpointTest < Minitest::Test
     assert_equal :clamp, L::LeaseAuthority.restored(SCOPE, saved, :clamp).clock_policy
     assert_equal :reject, L::LeaseAuthority.restored(SCOPE, saved, :reject).clock_policy
     assert_raises(ArgumentError) { L::LeaseAuthority.restored(SCOPE, saved) }
-    assert_raises(ArgumentError) { L::LeaseAuthority.restored(SCOPE, saved, :later) }
+    assert_raises(RangeError) { L::LeaseAuthority.restored(SCOPE, saved, :later) }
     assert_raises(TypeError) { L::LeaseAuthority.restored(SCOPE, saved.to_h, :reject) }
     assert_raises(TypeError) { L::LeaseAuthority.restored('7', saved, :reject) }
   end

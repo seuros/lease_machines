@@ -4,7 +4,8 @@ use std::cell::RefCell;
 use lease_machines::Cadence;
 use magnus::{Error, Ruby, Symbol, prelude::*, typed_data::Obj};
 
-use crate::{Nanos, Token, names};
+use crate::values::{CadenceValue, TokenValue};
+use crate::{Nanos, names};
 
 type Core = lease_machines::Holder;
 
@@ -12,7 +13,7 @@ type Core = lease_machines::Holder;
 type Timing = (Nanos, Nanos, Nanos);
 
 /// `Cadence::new`, or the `RangeError` its `None` stands for.
-fn cadence(ruby: &Ruby, timing: Timing) -> Result<Cadence, Error> {
+pub fn cadence(ruby: &Ruby, timing: Timing) -> Result<Cadence, Error> {
     Cadence::new(timing.0.0, timing.1.0, timing.2.0).ok_or_else(|| {
         Error::new(
             ruby.exception_range_error(),
@@ -21,27 +22,12 @@ fn cadence(ruby: &Ruby, timing: Timing) -> Result<Cadence, Error> {
     })
 }
 
-/// `LeaseMachines.native_cadence`: validate, answer nothing.
-pub fn validate(ruby: &Ruby, timing: Timing) -> Result<(), Error> {
-    cadence(ruby, timing).map(drop)
-}
-
 #[magnus::wrap(class = "LeaseMachines::Holder", free_immediately, size)]
 pub struct Holder(RefCell<Core>);
 
 impl Holder {
-    pub fn new(
-        ruby: &Ruby,
-        token: Token,
-        confirmed_at: Nanos,
-        timing: Timing,
-    ) -> Result<Self, Error> {
-        let cadence = cadence(ruby, timing)?;
-        Ok(Self(RefCell::new(Core::new(
-            token.0,
-            confirmed_at.0,
-            cadence,
-        ))))
+    pub const fn new(token: TokenValue, confirmed_at: Nanos, cadence: CadenceValue) -> Self {
+        Self(RefCell::new(Core::new(token.0, confirmed_at.0, cadence.0)))
     }
 
     pub fn state(ruby: &Ruby, this: &Self) -> Symbol {
@@ -79,7 +65,12 @@ impl Holder {
         Ok(names::refreshed(ruby, outcome))
     }
 
-    pub fn confirm(ruby: &Ruby, this: Obj<Self>, token: Token, at: Nanos) -> Result<Symbol, Error> {
+    pub fn confirm(
+        ruby: &Ruby,
+        this: Obj<Self>,
+        token: TokenValue,
+        at: Nanos,
+    ) -> Result<Symbol, Error> {
         this.check_frozen()?;
         let outcome = this.0.borrow_mut().confirm(token.0, at.0);
         Ok(names::recorded(ruby, outcome))
@@ -94,7 +85,7 @@ impl Holder {
     pub fn reacquire(
         ruby: &Ruby,
         this: Obj<Self>,
-        token: Token,
+        token: TokenValue,
         at: Nanos,
     ) -> Result<Symbol, Error> {
         this.check_frozen()?;

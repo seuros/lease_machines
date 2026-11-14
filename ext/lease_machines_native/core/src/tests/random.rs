@@ -27,6 +27,11 @@ impl Draws {
     fn chance(&mut self, percent: u64) -> bool {
         self.below(100) < percent
     }
+
+    /// One of `tokens`, which must not be empty.
+    fn pick(&mut self, tokens: &[FencingToken]) -> FencingToken {
+        tokens[usize::try_from(self.below(tokens.len() as u64)).unwrap()]
+    }
 }
 
 struct Run {
@@ -122,10 +127,7 @@ impl Run {
                 self.rival.scope(),
                 1 + self.draws.below(self.model.issued().max(1)),
             ),
-            3 | 4 if !self.issued.is_empty() => {
-                let index = self.draws.below(self.issued.len() as u64);
-                self.issued[usize::try_from(index).unwrap()]
-            }
+            3 | 4 if !self.issued.is_empty() => self.draws.pick(&self.issued),
             _ => self
                 .model
                 .lease()
@@ -138,22 +140,21 @@ impl Run {
         if self.draws.chance(20) && !self.foreign.is_empty() {
             return self.pick_foreign();
         }
-        let index = self.draws.below(self.issued.len() as u64);
-        self.issued[usize::try_from(index).unwrap()]
+        self.draws.pick(&self.issued)
     }
 
     fn pick_foreign(&mut self) -> FencingToken {
-        let index = self.draws.below(self.foreign.len() as u64);
-        self.foreign[usize::try_from(index).unwrap()]
+        self.draws.pick(&self.foreign)
     }
 
-    /// One authority call against the model, clone-compared when refused.
+    /// One authority call against the model, clone-compared when refused:
+    /// the honoured grant, once the whole answer matched the model's.
     fn decide(
         &mut self,
         name: &str,
         call: impl Fn(&mut LeaseAuthority) -> Result<Lease, Refusal>,
         expected: Result<Lease, Refusal>,
-    ) -> Result<Lease, Refusal> {
+    ) -> Option<Lease> {
         let before = self.core.clone();
         let answer = call(&mut self.core);
         assert_eq!(answer, expected, "{name}");
@@ -163,10 +164,11 @@ impl Run {
         assert_eq!(self.core.checkpoint(), self.model.checkpoint(), "{name}");
         assert_eq!(self.core.issued(), self.model.issued());
         self.seen.insert(format!("{name}:{}", label(&answer)));
-        answer
+        // The refusal was compared above; callers act only on a grant.
+        answer.ok()
     }
 
-    fn grant(&mut self, owner: OwnerId, rotate: bool) -> Result<Lease, Refusal> {
+    fn grant(&mut self, owner: OwnerId, rotate: bool) -> Option<Lease> {
         let (now, ttl) = (self.instant(), self.ttl());
         let expected = self.model.grant(owner, now, ttl, rotate);
         let name = if rotate { "reacquire" } else { "acquire" };
@@ -182,7 +184,7 @@ impl Run {
             },
             expected,
         );
-        if let Ok(lease) = answer {
+        if let Some(lease) = answer {
             // Newer than everything issued before: fencing depends on it.
             assert!(newest.is_none_or(|old| lease.token().is_newer_than(old)));
             assert_eq!(lease.token().scope(), self.model.scope);
@@ -191,7 +193,7 @@ impl Run {
         answer
     }
 
-    fn renew(&mut self, owner: OwnerId, token: FencingToken) -> Result<Lease, Refusal> {
+    fn renew(&mut self, owner: OwnerId, token: FencingToken) -> Option<Lease> {
         let (now, ttl) = (self.instant(), self.ttl());
         let expected = self.model.renew(owner, token, now, ttl);
         self.decide("renew", |core| core.renew(owner, token, now, ttl), expected)
@@ -200,7 +202,7 @@ impl Run {
     fn release(&mut self) {
         let (owner, token, now) = (self.owner(), self.token(), self.instant());
         let expected = self.model.release(owner, token, now);
-        let _ = self.decide("release", |core| core.release(owner, token, now), expected);
+        self.decide("release", |core| core.release(owner, token, now), expected);
     }
 
     /// A write reaches the resource: under a token this authority issued, or
@@ -212,8 +214,7 @@ impl Run {
             if self.draws.chance(50) {
                 newest
             } else {
-                let index = self.draws.below(self.issued.len() as u64);
-                self.issued[usize::try_from(index).unwrap()]
+                self.draws.pick(&self.issued)
             }
         } else {
             return;
@@ -257,15 +258,15 @@ impl Run {
         match self.draws.below(100) {
             0..=14 => {
                 let owner = self.owner();
-                let _ = self.grant(owner, false);
+                self.grant(owner, false);
             }
             15..=24 => {
                 let owner = self.owner();
-                let _ = self.grant(owner, true);
+                self.grant(owner, true);
             }
             25..=39 => {
                 let (owner, token) = (self.owner(), self.token());
-                let _ = self.renew(owner, token);
+                self.renew(owner, token);
             }
             40..=47 => self.release(),
             48..=62 => self.write(),

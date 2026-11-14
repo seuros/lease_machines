@@ -15,7 +15,7 @@ module LeaseMachines
   # A scope: an Integer in 0..65_535 (TypeError / RangeError otherwise).
   type scope = Integer
   # The core's `ClockPolicy`. Anything else raises: TypeError for a non-Symbol,
-  # ArgumentError for another Symbol.
+  # RangeError for another Symbol.
   type clock_policy = :reject | :clamp
   # The core's `HolderState`.
   type holder_state = :confirmed | :unconfirmed | :at_risk | :expired | :fenced
@@ -73,8 +73,12 @@ module LeaseMachines
     attr_reader owner: owner
     attr_reader token: FencingToken
     attr_reader expires_at: nanoseconds
-    def self.new: (owner owner, FencingToken token, nanoseconds expires_at) -> Lease
-                | (owner: owner, token: FencingToken, expires_at: nanoseconds) -> Lease
+    # Validated like a granted one: TypeError for a non-Integer owner or
+    # instant or a token without `raw`, RangeError for an owner outside
+    # 0..2**64-1, a token `from_raw` rejects or an instant out of range.
+    # `token` is read by its readers and kept as this gem's FencingToken.
+    def self.new: (owner owner, _FencingToken token, nanoseconds expires_at) -> Lease
+                | (owner: owner, token: _FencingToken, expires_at: nanoseconds) -> Lease
   end
 
   class Checkpoint < Data
@@ -130,14 +134,13 @@ module LeaseMachines
     type row = [Integer, Integer, Integer]
     type saved = [Integer, Integer, row?, Integer]
     def self.native_with_scope: (Integer) -> LeaseAuthority
-    def self.native_restored: (Integer, saved, Symbol) -> LeaseAuthority
+    def self.native_restored: (Integer, _Checkpoint, Symbol) -> LeaseAuthority
     def native_with_clock_policy: (Symbol) -> nil
     def native_checkpoint: () -> saved
-    def native_acquire: (Integer, Integer, Integer) -> (row | refusal)
-    def native_reacquire: (Integer, Integer, Integer) -> (row | refusal)
-    def native_renew: (Integer, Integer, Integer, Integer) -> (row | refusal)
-    def native_release: (Integer, Integer, Integer) -> (row | refusal)
-    def decided: (row | refusal) -> (Lease | refusal)
+    def native_acquire: (Integer, Integer, Integer) -> (Lease | refusal)
+    def native_reacquire: (Integer, Integer, Integer) -> (Lease | refusal)
+    def native_renew: (Integer, _FencingToken, Integer, Integer) -> (Lease | refusal)
+    def native_release: (Integer, _FencingToken, Integer) -> (Lease | refusal)
   end
 
   # The core's `Fence`, built for one scope.
@@ -157,9 +160,9 @@ module LeaseMachines
     private
 
     def self.native_with_scope: (Integer) -> Fence
-    def self.native_resumed: (Integer, Integer?) -> Fence
+    def self.native_resumed: (Integer, _FencingToken?) -> Fence
     def native_highest: () -> Integer?
-    def native_accept: (Integer) -> Symbol
+    def native_accept: (_FencingToken) -> Symbol
   end
 
   # The core's `Holder`, following the tokens of one scope.
@@ -187,27 +190,21 @@ module LeaseMachines
 
     private
 
-    def self.native_new: (Integer, Integer, [Integer, Integer, Integer]) -> Holder
+    def self.native_new: (_FencingToken, Integer, Cadence) -> Holder
     def native_token: () -> Integer
     def native_cadence: () -> [Integer, Integer, Integer]
-    def native_confirm: (Integer, Integer) -> Symbol
-    def native_reacquire: (Integer, Integer) -> Symbol
+    def native_confirm: (_FencingToken, Integer) -> Symbol
+    def native_reacquire: (_FencingToken, Integer) -> Symbol
   end
 
   private
 
-  def self.native_token_scope: (Integer) -> Integer
-  def self.native_token_order: (Integer, Integer) -> (-1 | 0 | 1)?
-  def self.native_token_newer: (Integer, Integer) -> bool
-  def self.native_cadence: ([Integer, Integer, Integer]) -> nil
-  def self.native_checkpoint: ([Integer, Integer, [Integer, Integer, Integer]?, Integer]) -> nil
-
-  module Rows
-    def self?.read: (untyped value, Symbol reader, String what) -> untyped
-    def self?.raw: (_FencingToken) -> Integer
-    def self?.lease: (_Lease) -> [Integer, Integer, Integer]
-    def self?.to_lease: ([Integer, Integer, Integer]) -> Lease
-    def self?.checkpoint: (_Checkpoint) -> [Integer, Integer, [Integer, Integer, Integer]?, Integer]
-    def self?.cadence: (Cadence) -> [Integer, Integer, Integer]
-  end
+  def self.native_raw: (Integer) -> nil
+  def self.native_token_scope: (_FencingToken) -> Integer
+  def self.native_token_order: (_FencingToken, _FencingToken) -> (-1 | 0 | 1)?
+  def self.native_token_newer: (_FencingToken, _FencingToken) -> bool
+  def self.native_lease: (owner, _FencingToken, nanoseconds) -> FencingToken
+  def self.native_cadence: (nanoseconds, nanoseconds, nanoseconds) -> nil
+  def self.native_checkpoint: (scope, Integer, _Lease?, nanoseconds) -> Lease?
+  def self.lease_of: ([Integer, Integer, Integer]) -> Lease
 end

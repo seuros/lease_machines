@@ -72,7 +72,7 @@ class AuthorityTest < Minitest::Test
     assert_equal lease, @authority.release(1, lease.token, at(2))
     assert_equal at(15), @authority.acquire(2, at(1), at(5)).expires_at
     assert_raises(TypeError) { @authority.with_clock_policy('clamp') }
-    assert_raises(ArgumentError) { @authority.with_clock_policy(:ignore) }
+    assert_raises(RangeError) { @authority.with_clock_policy(:ignore) }
     assert_equal %i[reject clamp], L::CLOCK_POLICIES
   end
 
@@ -156,6 +156,20 @@ class AuthorityTest < Minitest::Test
     assert_raises(FrozenError) { @authority.release(1, lease.token, 0) }
     assert_raises(FrozenError) { @authority.with_clock_policy(:clamp) }
     assert_equal 1, @authority.checkpoint.issued
+  end
+
+  # The classes of an honoured answer are resolved once at load: removing a
+  # constant afterwards changes nothing the binding builds.
+  def test_answer_classes_are_resolved_at_load
+    %i[Lease FencingToken].each do |name|
+      saved = L.send(:remove_const, name)
+      begin
+        lease = L::LeaseAuthority.with_scope(SCOPE).acquire(1, 0, at(1))
+        assert_instance_of saved, name == :Lease ? lease : lease.token
+      ensure
+        L.const_set(name, saved)
+      end
+    end
   end
 
   def test_refusals_are_listed_once_each

@@ -1,21 +1,25 @@
-//! `LeaseMachines::LeaseAuthority` and the checkpoint rows it trades in.
+//! `LeaseMachines::LeaseAuthority` and the checkpoints it trades in.
 use std::cell::RefCell;
 
 use lease_machines::{Checkpoint, Lease, OwnerId, Refusal};
 use magnus::{Error, IntoValue, Ruby, Value, prelude::*, typed_data::Obj};
 
+use crate::classes::keep;
 use crate::names::{self, Policy};
-use crate::{Nanos, Number, Row, Scope, Token, lease, row};
+use crate::values::{CheckpointValue, TokenValue, lease_object};
+use crate::{Nanos, Number, Scope};
 
 type Core = lease_machines::LeaseAuthority;
 
-/// A checkpoint as `[scope, issued, lease, observed]`, lease `nil` or a row.
-type Saved = (Scope, Number, Option<Row>, Nanos);
-
 /// `Checkpoint::from_parts`, or the `RangeError` its `None` stands for.
-pub fn checkpoint(ruby: &Ruby, saved: Saved) -> Result<Checkpoint, Error> {
-    let (scope, issued, held, observed) = saved;
-    Checkpoint::from_parts(scope.0, issued.0, held.map(lease), observed.0).ok_or_else(|| {
+pub fn checkpoint(
+    ruby: &Ruby,
+    scope: Scope,
+    issued: Number,
+    held: Option<Lease>,
+    observed: Nanos,
+) -> Result<Checkpoint, Error> {
+    Checkpoint::from_parts(scope.0, issued.0, held, observed.0).ok_or_else(|| {
         Error::new(
             ruby.exception_range_error(),
             "issued is beyond the scope's token space, or the lease is not the grant \
@@ -24,9 +28,14 @@ pub fn checkpoint(ruby: &Ruby, saved: Saved) -> Result<Checkpoint, Error> {
     })
 }
 
-/// `LeaseMachines.native_checkpoint`: validate, answer nothing.
-pub fn validate(ruby: &Ruby, saved: Saved) -> Result<(), Error> {
-    checkpoint(ruby, saved).map(drop)
+/// A lease as `[owner, token, expires_at]`, for Ruby to build a `Lease` of.
+fn row(ruby: &Ruby, lease: Lease) -> Value {
+    (
+        lease.owner().value(),
+        lease.token().raw(),
+        lease.expires_at().as_nanos(),
+    )
+        .into_value_with(ruby)
 }
 
 #[magnus::wrap(class = "LeaseMachines::LeaseAuthority", free_immediately, size)]
@@ -37,9 +46,13 @@ impl LeaseAuthority {
         Self(RefCell::new(Core::with_scope(scope.0)))
     }
 
-    pub fn restored(ruby: &Ruby, scope: Scope, saved: Saved, clock: Policy) -> Result<Self, Error> {
-        let committed = checkpoint(ruby, saved)?;
-        Core::restored(scope.0, committed, clock.0)
+    pub fn restored(
+        ruby: &Ruby,
+        scope: Scope,
+        saved: CheckpointValue,
+        clock: Policy,
+    ) -> Result<Self, Error> {
+        Core::restored(scope.0, saved.0, clock.0)
             .map(|core| Self(RefCell::new(core)))
             .ok_or_else(|| {
                 Error::new(
@@ -79,17 +92,18 @@ impl LeaseAuthority {
             .into_value_with(ruby)
     }
 
-    /// Every decision: the lease row when honoured, or the refusal symbol.
+    /// Every decision: a `Lease` when honoured, or the refusal symbol.
+    /// Everything that can raise happens before the core is called; the
+    /// `Lease` is built while the decision is held on a copy, kept only once
+    /// it exists (clone-then-keep).
     fn decide(
         ruby: &Ruby,
         this: Obj<Self>,
         call: impl FnOnce(&mut Core) -> Result<Lease, Refusal>,
     ) -> Result<Value, Error> {
-        this.check_frozen()?;
-        let decision = call(&mut this.0.borrow_mut());
-        Ok(match decision {
-            Ok(granted) => row(ruby, granted),
-            Err(refusal) => ruby.to_symbol(names::refusal(refusal)).as_value(),
+        keep(ruby, this, &this.0, call, |decision| match decision {
+            Ok(granted) => lease_object(ruby, granted),
+            Err(refusal) => Ok(ruby.to_symbol(names::refusal(refusal)).as_value()),
         })
     }
 
@@ -121,7 +135,7 @@ impl LeaseAuthority {
         ruby: &Ruby,
         this: Obj<Self>,
         owner: Number,
-        token: Token,
+        token: TokenValue,
         now: Nanos,
         ttl: Nanos,
     ) -> Result<Value, Error> {
@@ -134,7 +148,7 @@ impl LeaseAuthority {
         ruby: &Ruby,
         this: Obj<Self>,
         owner: Number,
-        token: Token,
+        token: TokenValue,
         now: Nanos,
     ) -> Result<Value, Error> {
         Self::decide(ruby, this, |core| {

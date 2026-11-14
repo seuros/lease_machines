@@ -135,6 +135,21 @@ The authority's watermark (`Checkpoint::observed`) is the latest instant of an
   If the clamped call is honoured the watermark stays where it was; if it is
   refused for another reason nothing changes, like any refusal.
 
+Which honoured answers record the clock:
+
+| Call | Records `now` | Why |
+| --- | --- | --- |
+| `acquire`, `reacquire` | yes | the vacancy and the new expiry depend on the instant |
+| `renew` | yes, a replay included | honoured only while unexpired at the instant |
+| `release` | yes | honoured only while unexpired at the instant |
+| `Fence::accept` | no clock | tokens only |
+| `Holder::refresh` | no | a holder keeps no watermark; `now` only picks `Unconfirmed` or `AtRisk` |
+| `Holder::confirm`, `Holder::reacquire` | `Recorded` schedules from `at`; `Duplicate` records nothing | the report holds whatever the time |
+| `Holder::expire` | no clock | |
+
+Under `Clamp` the instant recorded is the one evaluated at, so the watermark
+stays where it was.
+
 **`Expired` is an answer about the instant supplied, not a recorded fact.**
 Under either policy a refused `Expired` moves no watermark, so the same call
 at an earlier instant that is not behind the latest honoured one may be
