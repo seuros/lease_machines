@@ -1,6 +1,6 @@
 //! Private native entry point.
 use magnus::{Error, Ruby, function, method, prelude::*};
-use matryona_machines::ruby::{Symbols, fencing};
+use matryona_machines::ruby::{Class, Symbols, fencing};
 
 use crate::authority::LeaseAuthority;
 use crate::fence::Fence;
@@ -49,6 +49,9 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     class.define_private_method("native_reacquire", method!(LeaseAuthority::reacquire, 3))?;
     class.define_private_method("native_renew", method!(LeaseAuthority::renew, 4))?;
     class.define_private_method("native_release", method!(LeaseAuthority::release, 3))?;
+    // Every wrapped class is fixed now, before a method can answer one: no
+    // conversion runs `Object.const_get` later.
+    Class::pin_wrapped::<LeaseAuthority>(ruby, class)?;
 
     let class = module.define_class("Fence", ruby.class_object())?;
     class.undef_default_alloc_func();
@@ -57,6 +60,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     class.define_method("scope", method!(Fence::scope, 0))?;
     class.define_private_method("native_highest", method!(Fence::highest, 0))?;
     class.define_private_method("native_accept", method!(Fence::accept, 1))?;
+    Class::pin_wrapped::<Fence>(ruby, class)?;
 
     let class = module.define_class("Holder", ruby.class_object())?;
     class.undef_default_alloc_func();
@@ -72,5 +76,5 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     class.define_method("expire", method!(Holder::expire, 0))?;
     class.define_private_method("native_reacquire", method!(Holder::reacquire, 2))?;
     class.define_method("fence", method!(Holder::fence, 0))?;
-    Ok(())
+    Class::pin_wrapped::<Holder>(ruby, class).map(drop)
 }
