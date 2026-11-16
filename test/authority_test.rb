@@ -22,6 +22,20 @@ class AuthorityTest < Minitest::Test
     assert_equal 2, @authority.issued
   end
 
+  def test_incumbent_is_the_grant_an_acquire_would_meet
+    assert_nil @authority.incumbent(at(0), at(5))
+    first = @authority.acquire(1, at(1), at(5))
+    before = snapshot(@authority)
+    assert_equal first, @authority.incumbent(at(5), at(5))
+    assert_instance_of L::Lease, @authority.incumbent(at(1), at(5))
+    assert_nil @authority.incumbent(at(6), at(5))
+    assert_equal :clock_regressed, @authority.incumbent(at(0), at(5))
+    assert_equal :invalid_ttl, @authority.incumbent(at(2), 0)
+    assert_equal before, snapshot(@authority), 'a query changed something'
+    assert_raises(TypeError) { @authority.incumbent(1.0, at(5)) }
+    assert_raises(RangeError) { @authority.incumbent(-1, at(5)) }
+  end
+
   def test_new_is_scope_zero_and_counts_from_one
     authority = L::LeaseAuthority.new
     assert_equal [0, 0, :reject], [authority.scope, authority.issued, authority.clock_policy]

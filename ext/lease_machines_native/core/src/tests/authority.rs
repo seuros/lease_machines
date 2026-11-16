@@ -220,3 +220,51 @@ fn refusals_say_why_in_words() {
         );
     }
 }
+
+#[test]
+fn incumbent_is_the_grant_an_acquire_would_meet() {
+    let mut authority = LeaseAuthority::with_scope(SCOPE);
+    assert_eq!(authority.incumbent(at(0), at(5)), Ok(None));
+    let first = authority.acquire(FIRST, at(1), at(5)).unwrap();
+    // Live for its owner (`Held`) and for anyone else (`Occupied`) alike.
+    assert_eq!(authority.incumbent(at(1), at(5)), Ok(Some(first)));
+    assert_eq!(authority.incumbent(at(5), at(5)), Ok(Some(first)));
+    // Expired exactly at its deadline, as `acquire` sees it.
+    assert_eq!(authority.incumbent(at(6), at(5)), Ok(None));
+    // Checked in `acquire`'s order: the clock, then the ttl, then the grant.
+    assert_eq!(
+        authority.incumbent(at(0), at(5)),
+        Err(Refusal::ClockRegressed)
+    );
+    assert_eq!(authority.incumbent(at(2), at(0)), Err(Refusal::InvalidTtl));
+    let overflow = authority.incumbent(at(2), Duration::MAX);
+    assert_eq!(overflow, Err(Refusal::InvalidTtl));
+    // A query: nothing recorded, not even the instant.
+    let before = authority.clone();
+    let _ = authority.incumbent(at(9), at(5));
+    assert_eq!(authority, before);
+    assert_eq!(
+        authority.acquire(SECOND, at(2), at(5)),
+        Err(Refusal::Occupied)
+    );
+    assert_eq!(authority.release(FIRST, first.token(), at(2)), Ok(first));
+    assert_eq!(authority.incumbent(at(2), at(5)), Ok(None));
+}
+
+#[test]
+fn incumbent_under_clamp_is_evaluated_at_the_watermark() {
+    let mut authority = LeaseAuthority::with_scope(SCOPE).with_clock_policy(ClockPolicy::Clamp);
+    let first = authority.acquire(FIRST, at(4), at(5)).unwrap();
+    // An earlier `now` is read as the watermark, where the grant is live.
+    assert_eq!(authority.incumbent(at(0), at(5)), Ok(Some(first)));
+    // The ttl overflows from the watermark, not from the earlier `now`.
+    let overflow = Duration::MAX.checked_sub(at(2)).unwrap();
+    assert_eq!(
+        authority.incumbent(at(0), overflow),
+        Err(Refusal::InvalidTtl)
+    );
+    assert_eq!(
+        authority.acquire(FIRST, at(0), overflow),
+        Err(Refusal::InvalidTtl)
+    );
+}

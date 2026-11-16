@@ -1,31 +1,18 @@
 //! `LeaseMachines::LeaseAuthority` and the checkpoints it trades in.
 use std::{cell::RefCell, time::Duration};
 
-use lease_machines::{Checkpoint, Lease, OwnerId, Refusal};
-use magnus::{Error, IntoValue, Ruby, Value, prelude::*, typed_data::Obj};
-use matryona_machines::ruby::{Symbols, instant, integer, keep, nanoseconds};
+use lease_machines::{Lease, OwnerId, Refusal};
+use magnus::{Error, Ruby, Value, prelude::*, typed_data::Obj};
+use matryona_machines::ruby::{
+    Symbols,
+    fencing::{self, checkpoint, checkpoint_row, lease_object},
+    instant, integer, keep,
+};
 
 use crate::names;
-use crate::values::{self, lease_object};
+use crate::values::Family;
 
 type Core = lease_machines::LeaseAuthority;
-
-/// `Checkpoint::from_parts`, or the `RangeError` its `None` stands for.
-pub fn checkpoint(
-    ruby: &Ruby,
-    scope: u16,
-    issued: u64,
-    held: Option<Lease>,
-    observed: Duration,
-) -> Result<Checkpoint, Error> {
-    Checkpoint::from_parts(scope, issued, held, observed).ok_or_else(|| {
-        Error::new(
-            ruby.exception_range_error(),
-            "issued is beyond the scope's token space, or the lease is not the grant \
-             that history ends with",
-        )
-    })
-}
 
 fn owner(value: Value) -> Result<OwnerId, Error> {
     integer(value, "owner").map(OwnerId::new)
@@ -40,16 +27,6 @@ fn times(owner: Value, now: Value, ttl: Value) -> Result<(OwnerId, Duration, Dur
     ))
 }
 
-/// A lease as `[owner, token, expires_at]`, for Ruby to build a `Lease` of.
-fn row(ruby: &Ruby, lease: Lease) -> Value {
-    (
-        lease.owner().value(),
-        lease.token().raw(),
-        nanoseconds(ruby, lease.expires_at()),
-    )
-        .into_value_with(ruby)
-}
-
 #[magnus::wrap(class = "LeaseMachines::LeaseAuthority", free_immediately, size)]
 pub struct LeaseAuthority(RefCell<Core>);
 
@@ -61,7 +38,7 @@ impl LeaseAuthority {
     }
 
     pub fn restored(ruby: &Ruby, scope: Value, saved: Value, clock: Value) -> Result<Self, Error> {
-        let (scope, saved) = (integer(scope, "scope")?, values::checkpoint(ruby, saved)?);
+        let (scope, saved) = (integer(scope, "scope")?, checkpoint::<Family>(ruby, saved)?);
         Core::restored(scope, saved, names::ClockPolicies::parse(ruby, clock)?)
             .map(|core| Self(RefCell::new(core)))
             .ok_or_else(|| {
@@ -93,14 +70,21 @@ impl LeaseAuthority {
     }
 
     pub fn checkpoint(ruby: &Ruby, this: &Self) -> Value {
-        let saved = this.0.borrow().checkpoint();
-        (
-            saved.scope(),
-            saved.issued(),
-            saved.lease().map(|held| row(ruby, held)),
-            nanoseconds(ruby, saved.observed()),
-        )
-            .into_value_with(ruby)
+        checkpoint_row::<Family>(ruby, &this.0.borrow().checkpoint())
+    }
+
+    /// The live grant an `acquire` at `now` for `ttl` would meet: a
+    /// `Lease`, `nil` when it would grant, or the refusal symbol. A query
+    /// records nothing, so the `Lease` is built once the borrow has ended,
+    /// with no copy to keep.
+    pub fn incumbent(ruby: &Ruby, this: &Self, now: Value, ttl: Value) -> Result<Value, Error> {
+        let (now, ttl) = (instant(now, "now")?, instant(ttl, "ttl")?);
+        let answer = this.0.borrow().incumbent(now, ttl);
+        match answer {
+            Ok(Some(live)) => lease_object::<Family>(ruby, live),
+            Ok(None) => Ok(ruby.qnil().as_value()),
+            Err(refusal) => Ok(names::Refusals::symbol(ruby, refusal).as_value()),
+        }
     }
 
     /// Every decision: a `Lease` when honoured, or the refusal symbol.
@@ -113,7 +97,7 @@ impl LeaseAuthority {
         call: impl FnOnce(&mut Core) -> Result<Lease, Refusal>,
     ) -> Result<Value, Error> {
         keep(ruby, this, &this.0, call, |decision| match decision {
-            Ok(granted) => lease_object(ruby, granted),
+            Ok(granted) => lease_object::<Family>(ruby, granted),
             Err(refusal) => Ok(names::Refusals::symbol(ruby, refusal).as_value()),
         })
     }
@@ -151,7 +135,7 @@ impl LeaseAuthority {
         ttl: Value,
     ) -> Result<Value, Error> {
         this.check_frozen()?;
-        let (owner, token) = (self::owner(owner)?, values::token(ruby, token)?);
+        let (owner, token) = (self::owner(owner)?, fencing::token::<Family>(ruby, token)?);
         let (now, ttl) = (instant(now, "now")?, instant(ttl, "ttl")?);
         Self::decide(ruby, this, |core| core.renew(owner, token, now, ttl))
     }
@@ -164,7 +148,7 @@ impl LeaseAuthority {
         now: Value,
     ) -> Result<Value, Error> {
         this.check_frozen()?;
-        let (owner, token) = (self::owner(owner)?, values::token(ruby, token)?);
+        let (owner, token) = (self::owner(owner)?, fencing::token::<Family>(ruby, token)?);
         let now = instant(now, "now")?;
         Self::decide(ruby, this, |core| core.release(owner, token, now))
     }

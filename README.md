@@ -328,6 +328,7 @@ A call that is honoured answers with a value. A call that is not honoured answer
 | Call | Honoured | Refusals | Records the clock |
 | --- | --- | --- | --- |
 | `authority.acquire(owner, now, ttl)` | `Lease` | `:clock_regressed`, `:invalid_ttl`, `:occupied`, `:held`, `:exhausted` | yes: the grant's expiry and the vacancy both depend on `now` |
+| `authority.incumbent(now, ttl)` | `Lease` (the live grant an `acquire` would meet), `nil` (it would grant) | `:clock_regressed`, `:invalid_ttl` | no: a query, it records nothing |
 | `authority.reacquire(owner, now, ttl)` | `Lease` (new token every time) | `:clock_regressed`, `:invalid_ttl`, `:occupied`, `:exhausted` | yes, like `acquire` |
 | `authority.renew(owner, token, now, ttl)` | `Lease` | `:unknown`, `:clock_regressed`, `:no_lease`, `:wrong_owner`, `:stale_token`, `:expired`, `:invalid_ttl` | yes: honoured only while unexpired at `now`, a replay included |
 | `authority.release(owner, token, now)` | `Lease` (the one released) | `:unknown`, `:clock_regressed`, `:no_lease`, `:wrong_owner`, `:stale_token`, `:expired` | yes: honoured only while unexpired at `now` |

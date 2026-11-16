@@ -156,7 +156,18 @@ impl Run {
 
     fn grant(&mut self, owner: OwnerId, rotate: bool) -> Option<Lease> {
         let (now, ttl) = (self.instant(), self.ttl());
+        let live = self.core.incumbent(now, ttl);
+        assert_eq!(live, self.model.incumbent(now, ttl), "incumbent");
         let expected = self.model.grant(owner, now, ttl, rotate);
+        // The query names exactly the grant `acquire` is refused for.
+        if !rotate {
+            let occupied = matches!(expected, Err(Refusal::Occupied | Refusal::Held));
+            assert_eq!(
+                occupied,
+                matches!(live, Ok(Some(_))),
+                "incumbent vs acquire"
+            );
+        }
         let name = if rotate { "reacquire" } else { "acquire" };
         let newest = self.issued.last().copied();
         let answer = self.decide(

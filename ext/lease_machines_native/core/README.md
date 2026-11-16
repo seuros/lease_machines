@@ -43,6 +43,11 @@ assert_eq!(
 - `reacquire` is `acquire` plus one exception: the current owner may rotate its own
   unexpired grant to a new token. The old token is stale from then on, so anything
   still holding it is fenced. Another owner's live grant is still `Occupied`.
+- `incumbent(now, ttl)` asks before acting: `Ok(Some(lease))` is the live grant
+  an `acquire` at `now` would be refused for (`Occupied` or `Held`), `Ok(None)`
+  means it would grant. It checks `ClockRegressed` and `InvalidTtl` exactly as
+  `acquire` does, in that order, and records nothing. An election honours a
+  live leader through it instead of reading a refusal back.
 
 ## Contract
 
@@ -62,7 +67,7 @@ no grant, no token, no observed clock. Every operation that can refuse returns
 | `Unknown` | a token of another scope, or one the authority never issued | `renew`, `release`, `Fence::accept`, `Holder::confirm`, `Holder::reacquire` |
 | `Expired` | the grant is expired at the instant supplied (authority); the holder recorded `expire` (holder) | `renew`, `release`, `Holder::confirm` |
 | `ClockRegressed` | `now` is before the latest honoured observation | every authority call, under `ClockPolicy::Reject` |
-| `InvalidTtl` | zero TTL, or `now + ttl` overflows | `acquire`, `reacquire`, `renew` |
+| `InvalidTtl` | zero TTL, or `now + ttl` overflows | `acquire`, `reacquire`, `renew`, `incumbent` |
 | `Exhausted` | the scope's tokens are spent | `acquire`, `reacquire` |
 | `Fenced` | the holder is fenced | `Holder::refresh`, `confirm`, `expire`, `reacquire` |
 | `OutOfPhase` | the holder neither waits for the report nor recorded it | `Holder::confirm`, `Holder::reacquire` |
@@ -142,6 +147,7 @@ Which honoured answers record the clock:
 | `acquire`, `reacquire` | yes | the vacancy and the new expiry depend on the instant |
 | `renew` | yes, a replay included | honoured only while unexpired at the instant |
 | `release` | yes | honoured only while unexpired at the instant |
+| `incumbent` | no | a query: it answers about the instant and keeps nothing |
 | `Fence::accept` | no clock | tokens only |
 | `Holder::refresh` | no | a holder keeps no watermark; `now` only picks `Unconfirmed` or `AtRisk` |
 | `Holder::confirm`, `Holder::reacquire` | `Recorded` schedules from `at`; `Duplicate` records nothing | the report holds whatever the time |

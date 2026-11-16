@@ -158,6 +158,34 @@ impl LeaseAuthority {
         self.grant(owner, now, ttl, true)
     }
 
+    /// The unexpired grant an `acquire(_, now, ttl)` would meet, checked as
+    /// `acquire` checks it: `Some` where it would answer `Occupied` (another
+    /// owner's) or `Held` (the owner's own), `None` where it would grant or
+    /// answer `Exhausted`. A query: it records nothing, not even the instant.
+    ///
+    /// It takes the `ttl` so the order holds for a caller that acts on the
+    /// answer, such as an election honouring a live leader: a malformed ttl
+    /// is refused whether or not a grant is live.
+    ///
+    /// # Errors
+    /// `ClockRegressed` or `InvalidTtl`, as `acquire` would refuse them.
+    pub fn incumbent(&self, now: Duration, ttl: Duration) -> Result<Option<Lease>, Refusal> {
+        self.live(now, ttl).map(|(_, _, live)| live)
+    }
+
+    /// The instant a grant at `now` is evaluated at, its expiry for `ttl`,
+    /// and the grant still live then. Records nothing.
+    fn live(
+        &self,
+        now: Duration,
+        ttl: Duration,
+    ) -> Result<(Duration, Duration, Option<Lease>), Refusal> {
+        let now = self.at(now)?;
+        let expires_at = expiration(now, ttl).ok_or(Refusal::InvalidTtl)?;
+        let live = self.lease.filter(|lease| now < lease.expires_at());
+        Ok((now, expires_at, live))
+    }
+
     fn grant(
         &mut self,
         owner: OwnerId,
@@ -165,11 +193,8 @@ impl LeaseAuthority {
         ttl: Duration,
         rotate: bool,
     ) -> Result<Lease, Refusal> {
-        let now = self.at(now)?;
-        let expires_at = expiration(now, ttl).ok_or(Refusal::InvalidTtl)?;
-        if let Some(lease) = self.lease
-            && now < lease.expires_at()
-        {
+        let (now, expires_at, live) = self.live(now, ttl)?;
+        if let Some(lease) = live {
             if lease.owner() != owner {
                 return Err(Refusal::Occupied);
             }

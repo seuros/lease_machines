@@ -1,33 +1,32 @@
 //! Private native entry point.
-use magnus::{Error, RArray, Ruby, function, method, prelude::*};
-use matryona_machines::ruby::Symbols;
+use magnus::{Error, Ruby, function, method, prelude::*};
+use matryona_machines::ruby::{Symbols, fencing};
 
 use crate::authority::LeaseAuthority;
-use crate::fence::{self, Fence};
+use crate::fence::Fence;
 use crate::holder::Holder;
-use crate::{classes, names, values};
-
-/// Every Symbol of a table, in its order, frozen.
-fn every<T: Symbols>(ruby: &Ruby) -> RArray {
-    let list = ruby.ary_from_iter(T::ALL.iter().map(|variant| T::symbol(ruby, *variant)));
-    list.freeze();
-    list
-}
+use crate::values::{self, Family};
+use crate::{classes, names};
 
 #[magnus::init]
 fn init(ruby: &Ruby) -> Result<(), Error> {
     let module = ruby.define_module("LeaseMachines")?;
     classes::resolve(ruby, module)?;
-    module.const_set("REFUSALS", every::<names::Refusals>(ruby))?;
-    module.const_set("HOLDER_STATES", every::<names::HolderStates>(ruby))?;
-    module.const_set("CLOCK_POLICIES", every::<names::ClockPolicies>(ruby))?;
-    module.define_singleton_method("native_token_scope", function!(fence::token_scope, 1))?;
-    module.define_singleton_method("native_token_order", function!(fence::token_order, 2))?;
-    module.define_singleton_method("native_token_newer", function!(fence::token_newer, 2))?;
-    module.define_singleton_method("native_raw", function!(crate::validate_raw, 1))?;
-    module.define_singleton_method("native_lease", function!(values::validate_lease, 3))?;
+    module.const_set("REFUSALS", names::Refusals::every(ruby))?;
+    module.const_set("HOLDER_STATES", names::HolderStates::every(ruby))?;
+    module.const_set("CLOCK_POLICIES", names::ClockPolicies::every(ruby))?;
+    let scope = function!(fencing::token_scope::<Family>, 1);
+    module.define_singleton_method("native_token_scope", scope)?;
+    let order = function!(fencing::token_order::<Family>, 2);
+    module.define_singleton_method("native_token_order", order)?;
+    let newer = function!(fencing::token_newer::<Family>, 2);
+    module.define_singleton_method("native_token_newer", newer)?;
+    let raw = function!(fencing::validate_raw::<Family>, 1);
+    module.define_singleton_method("native_raw", raw)?;
+    let lease = function!(fencing::validate_lease::<Family>, 3);
+    module.define_singleton_method("native_lease", lease)?;
     module.define_singleton_method("native_cadence", function!(values::validate_cadence, 3))?;
-    let checkpoint = function!(values::validate_checkpoint, 4);
+    let checkpoint = function!(fencing::validate_checkpoint::<Family>, 4);
     module.define_singleton_method("native_checkpoint", checkpoint)?;
 
     let class = module.define_class("LeaseAuthority", ruby.class_object())?;
@@ -40,6 +39,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     class.define_method("scope", method!(LeaseAuthority::scope, 0))?;
     class.define_method("issued", method!(LeaseAuthority::issued, 0))?;
     class.define_method("clock_policy", method!(LeaseAuthority::clock_policy, 0))?;
+    class.define_method("incumbent", method!(LeaseAuthority::incumbent, 2))?;
     class.define_private_method(
         "native_with_clock_policy",
         method!(LeaseAuthority::with_clock_policy, 1),

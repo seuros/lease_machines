@@ -3,9 +3,10 @@ use std::{cell::RefCell, time::Duration};
 
 use lease_machines::Cadence;
 use magnus::{Error, Integer, Ruby, Symbol, Value, prelude::*, typed_data::Obj};
-use matryona_machines::ruby::{Symbols, instant, nanoseconds};
+use matryona_machines::ruby::{Symbols, fencing, instant, nanoseconds};
 
-use crate::{names, values};
+use crate::names;
+use crate::values::{self, Family};
 
 type Core = lease_machines::Holder;
 
@@ -34,7 +35,7 @@ impl Holder {
         confirmed_at: Value,
         cadence: Value,
     ) -> Result<Self, Error> {
-        let token = values::token(ruby, token)?;
+        let token = fencing::token::<Family>(ruby, token)?;
         let confirmed_at = instant(confirmed_at, "confirmed_at")?;
         let cadence = values::cadence(ruby, cadence)?;
         Ok(Self(RefCell::new(Core::new(token, confirmed_at, cadence))))
@@ -81,7 +82,7 @@ impl Holder {
 
     pub fn confirm(ruby: &Ruby, this: Obj<Self>, token: Value, at: Value) -> Result<Symbol, Error> {
         this.check_frozen()?;
-        let (token, at) = (values::token(ruby, token)?, instant(at, "at")?);
+        let (token, at) = (fencing::token::<Family>(ruby, token)?, instant(at, "at")?);
         let outcome = this.0.borrow_mut().confirm(token, at);
         Ok(names::recorded(ruby, outcome))
     }
@@ -99,7 +100,7 @@ impl Holder {
         at: Value,
     ) -> Result<Symbol, Error> {
         this.check_frozen()?;
-        let (token, at) = (values::token(ruby, token)?, instant(at, "at")?);
+        let (token, at) = (fencing::token::<Family>(ruby, token)?, instant(at, "at")?);
         let outcome = this.0.borrow_mut().reacquire(token, at);
         Ok(names::recorded(ruby, outcome))
     }

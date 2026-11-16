@@ -120,6 +120,10 @@ module LeaseMachines
     def scope: () -> scope
     def issued: () -> Integer
     def checkpoint: () -> Checkpoint
+    # The live grant an `acquire(_, now, ttl)` would meet (:occupied or :held
+    # there), nil where it would grant, checked in acquire's order. A query:
+    # it records nothing, not even the clock.
+    def incumbent: (nanoseconds now, nanoseconds ttl) -> (Lease | nil | :clock_regressed | :invalid_ttl)
     def acquire: (owner owner, nanoseconds now, nanoseconds ttl)
                  -> (Lease | :clock_regressed | :invalid_ttl | :occupied | :held | :exhausted)
     def reacquire: (owner owner, nanoseconds now, nanoseconds ttl)
@@ -133,8 +137,8 @@ module LeaseMachines
 
     type row = [Integer, Integer, Integer]
     type saved = [Integer, Integer, row?, Integer]
-    def self.native_with_scope: (Integer) -> LeaseAuthority
-    def self.native_restored: (Integer, _Checkpoint, Symbol) -> LeaseAuthority
+    private def self.native_with_scope: (Integer) -> LeaseAuthority
+    private def self.native_restored: (Integer, _Checkpoint, Symbol) -> LeaseAuthority
     def native_with_clock_policy: (Symbol) -> nil
     def native_checkpoint: () -> saved
     def native_acquire: (Integer, Integer, Integer) -> (Lease | refusal)
@@ -159,8 +163,8 @@ module LeaseMachines
 
     private
 
-    def self.native_with_scope: (Integer) -> Fence
-    def self.native_resumed: (Integer, _FencingToken?) -> Fence
+    private def self.native_with_scope: (Integer) -> Fence
+    private def self.native_resumed: (Integer, _FencingToken?) -> Fence
     def native_highest: () -> Integer?
     def native_accept: (_FencingToken) -> Symbol
   end
@@ -190,7 +194,7 @@ module LeaseMachines
 
     private
 
-    def self.native_new: (_FencingToken, Integer, Cadence) -> Holder
+    private def self.native_new: (_FencingToken, Integer, Cadence) -> Holder
     def native_token: () -> Integer
     def native_cadence: () -> [Integer, Integer, Integer]
     def native_confirm: (_FencingToken, Integer) -> Symbol
@@ -199,12 +203,12 @@ module LeaseMachines
 
   private
 
-  def self.native_raw: (Integer) -> nil
-  def self.native_token_scope: (_FencingToken) -> Integer
-  def self.native_token_order: (_FencingToken, _FencingToken) -> (-1 | 0 | 1)?
-  def self.native_token_newer: (_FencingToken, _FencingToken) -> bool
-  def self.native_lease: (owner, _FencingToken, nanoseconds) -> FencingToken
-  def self.native_cadence: (nanoseconds, nanoseconds, nanoseconds) -> nil
-  def self.native_checkpoint: (scope, Integer, _Lease?, nanoseconds) -> Lease?
-  def self.lease_of: ([Integer, Integer, Integer]) -> Lease
+  private def self.native_raw: (Integer) -> nil
+  private def self.native_token_scope: (_FencingToken) -> Integer
+  private def self.native_token_order: (_FencingToken, _FencingToken) -> (-1 | 0 | 1)?
+  private def self.native_token_newer: (_FencingToken, _FencingToken) -> bool
+  private def self.native_lease: (owner, _FencingToken, nanoseconds) -> FencingToken
+  private def self.native_cadence: (nanoseconds, nanoseconds, nanoseconds) -> nil
+  private def self.native_checkpoint: (scope, Integer, _Lease?, nanoseconds) -> Lease?
+  private def self.lease_of: ([Integer, Integer, Integer]) -> Lease
 end

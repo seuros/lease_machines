@@ -1,4 +1,3 @@
-#![allow(clippy::unwrap_used)] // Failed test assumptions should panic.
 use core::{fmt::Debug, time::Duration};
 
 pub use matryona_machines::testing::{refuses, unchanged};
