@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/seuros/lease_machines/compare/lease_machines/v0.5.0...lease_machines/v0.5.1) (2026-11-16)
+
+
+### Features
+
+* LeaseAuthority#incumbent, the live grant an acquire would meet ([3d1aee8](https://github.com/seuros/lease_machines/commit/3d1aee86ae97478947a4128f90cd549dc1c6bd5f))
+
 ## [0.5.0](https://github.com/seuros/lease_machines/compare/lease_machines/v0.4.1...lease_machines/v0.5.0) (2026-11-14)
 
 
