@@ -97,6 +97,10 @@ pub enum Recording {
 
 /// Holder-side renewal tracker for a single grant.
 ///
+/// Renewal and warning deadlines saturate at `Duration::MAX`. (The
+/// authority's grant and renewal expiry instead refuse an overflowing
+/// `now + ttl` as `InvalidTtl`.)
+///
 /// Durations come from the holder's clock, not the authority's, so two
 /// machines never compare instants. Deadlines are derived from the moment a
 /// renewal was confirmed locally, which is never later than the authority's view.
