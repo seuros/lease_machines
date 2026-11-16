@@ -36,6 +36,24 @@ class AuthorityTest < Minitest::Test
     assert_raises(RangeError) { @authority.incumbent(-1, at(5)) }
   end
 
+  def test_check_is_a_renewal_without_the_ttl_or_the_record
+    old = @authority.acquire(1, at(1), at(5)).token
+    lease = @authority.reacquire(1, at(1), at(5))
+    before = snapshot(@authority)
+    assert_equal lease, @authority.check(1, lease.token, at(5))
+    assert_instance_of L::Lease, @authority.check(1, lease.token, at(1))
+    assert_equal :expired, @authority.check(1, lease.token, at(6))
+    assert_equal :unknown, @authority.check(1, token(OTHER, 2), at(2))
+    assert_equal :clock_regressed, @authority.check(1, lease.token, at(0))
+    assert_equal :wrong_owner, @authority.check(2, lease.token, at(2))
+    assert_equal :stale_token, @authority.check(1, old, at(2))
+    assert_equal before, snapshot(@authority), 'a query changed something'
+    @authority.release(1, lease.token, at(2))
+    assert_equal :no_lease, @authority.check(1, lease.token, at(2))
+    assert_raises(TypeError) { @authority.check(1, lease.token.raw, at(2)) }
+    assert_raises(RangeError) { @authority.check(1, lease.token, -1) }
+  end
+
   def test_new_is_scope_zero_and_counts_from_one
     authority = L::LeaseAuthority.new
     assert_equal [0, 0, :reject], [authority.scope, authority.issued, authority.clock_policy]

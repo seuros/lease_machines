@@ -124,6 +124,9 @@ module LeaseMachines
     # there), nil where it would grant, checked in acquire's order. A query:
     # it records nothing, not even the clock.
     def incumbent: (nanoseconds now, nanoseconds ttl) -> (Lease | nil | :clock_regressed | :invalid_ttl)
+    # The grant `owner` holds under `token`, live at `now`, checked as renew
+    # and release check it. A query: it records nothing, not even the clock.
+    def check: (owner owner, _FencingToken token, nanoseconds now) -> (Lease | held_refusal)
     def acquire: (owner owner, nanoseconds now, nanoseconds ttl)
                  -> (Lease | :clock_regressed | :invalid_ttl | :occupied | :held | :exhausted)
     def reacquire: (owner owner, nanoseconds now, nanoseconds ttl)

@@ -192,7 +192,13 @@ impl Run {
 
     fn renew(&mut self, owner: OwnerId, token: FencingToken) -> Option<Lease> {
         let (now, ttl) = (self.instant(), self.ttl());
+        let checked = self.core.check(owner, token, now);
+        assert_eq!(checked, self.model.check(owner, token, now), "check");
         let expected = self.model.renew(owner, token, now, ttl);
+        match expected {
+            Ok(_) | Err(Refusal::InvalidTtl) => assert!(checked.is_ok(), "check vs renew"),
+            Err(refusal) => assert_eq!(checked, Err(refusal), "check vs renew"),
+        }
         self.decide("renew", |core| core.renew(owner, token, now, ttl), expected)
     }
 

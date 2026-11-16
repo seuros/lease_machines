@@ -268,3 +268,58 @@ fn incumbent_under_clamp_is_evaluated_at_the_watermark() {
         Err(Refusal::InvalidTtl)
     );
 }
+
+#[test]
+fn check_is_a_renewal_without_the_ttl_or_the_record() {
+    let mut authority = LeaseAuthority::with_scope(SCOPE);
+    let old = authority.acquire(FIRST, at(1), at(5)).unwrap().token();
+    let lease = authority.reacquire(FIRST, at(1), at(5)).unwrap();
+    let live = lease.token();
+    assert_eq!(authority.check(FIRST, live, at(1)), Ok(lease));
+    assert_eq!(authority.check(FIRST, live, at(5)), Ok(lease));
+    assert_eq!(authority.check(FIRST, live, at(6)), Err(Refusal::Expired));
+    assert_eq!(
+        authority.check(FIRST, token(OTHER, 2), at(0)),
+        Err(Refusal::Unknown)
+    );
+    assert_eq!(
+        authority.check(FIRST, token(SCOPE, 3), at(2)),
+        Err(Refusal::Unknown)
+    );
+    assert_eq!(
+        authority.check(SECOND, old, at(0)),
+        Err(Refusal::ClockRegressed)
+    );
+    assert_eq!(
+        authority.check(SECOND, live, at(2)),
+        Err(Refusal::WrongOwner)
+    );
+    assert_eq!(authority.check(FIRST, old, at(2)), Err(Refusal::StaleToken));
+    let before = authority.clone();
+    let _ = authority.check(FIRST, live, at(4));
+    assert_eq!(authority, before);
+    assert_eq!(
+        authority
+            .renew(FIRST, live, at(2), at(5))
+            .map(Lease::expires_at),
+        Ok(at(7))
+    );
+    assert_eq!(
+        authority.release(FIRST, live, at(3)).map(Lease::token),
+        Ok(live)
+    );
+    assert_eq!(authority.check(FIRST, live, at(3)), Err(Refusal::NoLease));
+}
+
+#[test]
+fn check_under_clamp_is_evaluated_at_the_watermark() {
+    let mut authority = LeaseAuthority::with_scope(SCOPE).with_clock_policy(ClockPolicy::Clamp);
+    let lease = authority.acquire(FIRST, at(4), at(5)).unwrap();
+    assert_eq!(authority.check(FIRST, lease.token(), at(0)), Ok(lease));
+    let next = authority.acquire(SECOND, at(9), at(5)).unwrap();
+    assert_eq!(
+        authority.check(FIRST, lease.token(), at(0)),
+        Err(Refusal::WrongOwner)
+    );
+    assert_eq!(authority.check(SECOND, next.token(), at(0)), Ok(next));
+}

@@ -87,6 +87,24 @@ impl LeaseAuthority {
         }
     }
 
+    /// The grant `owner` holds under `token`, live at `now`: a `Lease`, or
+    /// the refusal symbol. A query, built like `incumbent`'s answer.
+    pub fn check(
+        ruby: &Ruby,
+        this: &Self,
+        owner: Value,
+        token: Value,
+        now: Value,
+    ) -> Result<Value, Error> {
+        let (owner, token) = (self::owner(owner)?, fencing::token::<Family>(ruby, token)?);
+        let now = instant(now, "now")?;
+        let answer = this.0.borrow().check(owner, token, now);
+        match answer {
+            Ok(held) => lease_object::<Family>(ruby, held),
+            Err(refusal) => Ok(names::Refusals::symbol(ruby, refusal).as_value()),
+        }
+    }
+
     /// Every decision: a `Lease` when honoured, or the refusal symbol.
     /// Everything that can raise happens before the core is called; the
     /// `Lease` is built while the decision is held on a copy, kept only once

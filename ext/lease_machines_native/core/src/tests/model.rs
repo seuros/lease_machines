@@ -144,6 +144,16 @@ impl Authority {
         Ok(now)
     }
 
+    pub fn check(
+        &self,
+        owner: OwnerId,
+        token: FencingToken,
+        now: Duration,
+    ) -> Result<Lease, Refusal> {
+        self.held(owner, token, now)?;
+        Ok(self.lease().unwrap())
+    }
+
     pub fn renew(
         &mut self,
         owner: OwnerId,

@@ -48,6 +48,11 @@ assert_eq!(
   means it would grant. It checks `ClockRegressed` and `InvalidTtl` exactly as
   `acquire` does, in that order, and records nothing. An election honours a
   live leader through it instead of reading a refusal back.
+- `check(owner, token, now)` asks whether a presented credential is the one in
+  force: `Ok(lease)` when `owner` holds the current grant under `token` and it
+  is live at `now`, or the refusal `renew` would give short of the TTL. It takes
+  no TTL and records nothing, so a protected write can verify its caller
+  without a dummy span.
 
 ## Contract
 
@@ -61,11 +66,11 @@ no grant, no token, no observed clock. Every operation that can refuse returns
 | --- | --- | --- |
 | `Occupied` | another owner's unexpired grant | `acquire`, `reacquire` |
 | `Held` | the owner's own unexpired grant | `acquire` |
-| `NoLease` | nothing to renew or release | `renew`, `release` |
-| `WrongOwner` | the owner is not the grant's | `renew`, `release` |
-| `StaleToken` | a token of this scope, older than the one in force | `renew`, `release`, `Fence::accept`, `Holder::confirm`, `Holder::reacquire` |
-| `Unknown` | a token of another scope, or one the authority never issued | `renew`, `release`, `Fence::accept`, `Holder::confirm`, `Holder::reacquire` |
-| `Expired` | the grant is expired at the instant supplied (authority); the holder recorded `expire` (holder) | `renew`, `release`, `Holder::confirm` |
+| `NoLease` | nothing to renew or release | `renew`, `release`, `check` |
+| `WrongOwner` | the owner is not the grant's | `renew`, `release`, `check` |
+| `StaleToken` | a token of this scope, older than the one in force | `renew`, `release`, `check`, `Fence::accept`, `Holder::confirm`, `Holder::reacquire` |
+| `Unknown` | a token of another scope, or one the authority never issued | `renew`, `release`, `check`, `Fence::accept`, `Holder::confirm`, `Holder::reacquire` |
+| `Expired` | the grant is expired at the instant supplied (authority); the holder recorded `expire` (holder) | `renew`, `release`, `check`, `Holder::confirm` |
 | `ClockRegressed` | `now` is before the latest honoured observation | every authority call, under `ClockPolicy::Reject` |
 | `InvalidTtl` | zero TTL, or `now + ttl` overflows | `acquire`, `reacquire`, `renew`, `incumbent` |
 | `Exhausted` | the scope's tokens are spent | `acquire`, `reacquire` |
@@ -73,7 +78,8 @@ no grant, no token, no observed clock. Every operation that can refuse returns
 | `OutOfPhase` | the holder neither waits for the report nor recorded it | `Holder::confirm`, `Holder::reacquire` |
 
 The authority checks in this order: `Unknown`, `ClockRegressed`, `NoLease`,
-`WrongOwner`, `StaleToken`, `Expired`, `InvalidTtl` for `renew` and `release`;
+`WrongOwner`, `StaleToken`, `Expired`, `InvalidTtl` for `renew` and `release`
+(`check` stops before `InvalidTtl`);
 `ClockRegressed`, `InvalidTtl`, `Occupied`, `Held`, `Exhausted` for `acquire`
 and `reacquire`. Issuing the token is the last step, so a call refused for any
 reason consumes none.
@@ -148,6 +154,7 @@ Which honoured answers record the clock:
 | `renew` | yes, a replay included | honoured only while unexpired at the instant |
 | `release` | yes | honoured only while unexpired at the instant |
 | `incumbent` | no | a query: it answers about the instant and keeps nothing |
+| `check` | no | a query, like `incumbent` |
 | `Fence::accept` | no clock | tokens only |
 | `Holder::refresh` | no | a holder keeps no watermark; `now` only picks `Unconfirmed` or `AtRisk` |
 | `Holder::confirm`, `Holder::reacquire` | `Recorded` schedules from `at`; `Duplicate` records nothing | the report holds whatever the time |

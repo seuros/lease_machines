@@ -173,6 +173,24 @@ impl LeaseAuthority {
         self.live(now, ttl).map(|(_, _, live)| live)
     }
 
+    /// The current grant, when `owner` holds it under `token` and it is live
+    /// at the instant the call is evaluated at: what a protected write
+    /// presents before it is honoured. Checked as `renew` and `release` check
+    /// it, with no ttl to judge. A query: it records nothing, not even the
+    /// instant.
+    ///
+    /// # Errors
+    /// `Unknown`, `ClockRegressed`, `NoLease`, `WrongOwner`, `StaleToken` or
+    /// `Expired`.
+    pub fn check(
+        &self,
+        owner: OwnerId,
+        token: FencingToken,
+        now: Duration,
+    ) -> Result<Lease, Refusal> {
+        self.held(owner, token, now).map(|(_, lease)| lease)
+    }
+
     /// The instant a grant at `now` is evaluated at, its expiry for `ttl`,
     /// and the grant still live then. Records nothing.
     fn live(

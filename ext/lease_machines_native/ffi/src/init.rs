@@ -40,6 +40,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     class.define_method("issued", method!(LeaseAuthority::issued, 0))?;
     class.define_method("clock_policy", method!(LeaseAuthority::clock_policy, 0))?;
     class.define_method("incumbent", method!(LeaseAuthority::incumbent, 2))?;
+    class.define_method("check", method!(LeaseAuthority::check, 3))?;
     class.define_private_method(
         "native_with_clock_policy",
         method!(LeaseAuthority::with_clock_policy, 1),
