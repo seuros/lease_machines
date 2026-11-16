@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.2](https://github.com/seuros/lease_machines/compare/lease_machines/v0.5.1...lease_machines/v0.5.2) (2026-11-16)
+
+
+### Bug Fixes
+
+* fix wrapped classes at load so building a value runs no Ruby ([2905850](https://github.com/seuros/lease_machines/commit/2905850dd3812ab5fa5cf58dd894e3e806204e0b))
+
 ## [0.5.1](https://github.com/seuros/lease_machines/compare/lease_machines/v0.5.0...lease_machines/v0.5.1) (2026-11-16)
 
 
