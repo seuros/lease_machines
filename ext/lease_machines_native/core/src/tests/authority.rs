@@ -94,6 +94,33 @@ fn owner_and_token_are_both_required() {
     assert_eq!(authority.checkpoint().lease(), Some(lease));
 }
 
+/// An expired grant nobody replaced is still the grant in force: the wrong
+/// owner and a rotated-out token are refused for what they are, not as
+/// `Expired`, which only its rightful holder hears.
+#[test]
+fn credentials_are_judged_before_expiry() {
+    for policy in [ClockPolicy::Reject, ClockPolicy::Clamp] {
+        let mut authority = LeaseAuthority::with_scope(SCOPE).with_clock_policy(policy);
+        let old = authority.acquire(FIRST, at(0), at(10)).unwrap().token();
+        let lease = authority.reacquire(FIRST, at(0), at(10)).unwrap();
+        let live = lease.token();
+        let late = at(15);
+        for (owner, token, refusal) in [
+            (SECOND, live, Refusal::WrongOwner),
+            (SECOND, old, Refusal::WrongOwner),
+            (FIRST, old, Refusal::StaleToken),
+            (FIRST, live, Refusal::Expired),
+        ] {
+            refuses(&mut authority, refusal, |a| {
+                a.renew(owner, token, late, at(10))
+            });
+            refuses(&mut authority, refusal, |a| a.release(owner, token, late));
+            refuses(&mut authority, refusal, |a| a.check(owner, token, late));
+        }
+        assert_eq!(authority.checkpoint().lease(), Some(lease), "{policy:?}");
+    }
+}
+
 #[test]
 fn tokens_never_issued_are_unknown_before_any_lookup() {
     let mut authority = LeaseAuthority::with_scope(SCOPE);
