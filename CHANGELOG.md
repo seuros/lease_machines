@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.3](https://github.com/seuros/lease_machines/compare/lease_machines/v0.5.2...lease_machines/v0.5.3) (2026-11-17)
+
+
+### Features
+
+* LeaseAuthority#check, a read-only credential check ([7f8c596](https://github.com/seuros/lease_machines/commit/7f8c5966c91c37ea27839b376f9209867adb2187))
+
 ## [0.5.2](https://github.com/seuros/lease_machines/compare/lease_machines/v0.5.1...lease_machines/v0.5.2) (2026-11-16)
 
 
